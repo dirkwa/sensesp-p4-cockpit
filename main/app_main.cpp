@@ -376,7 +376,10 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(espos_ota_start());
 
   // ---- NMEA 2000 gateway: TWAI rx/tx + candump TCP server (:2599)
-  static espos_n2k::TwaiReceiver n2k_rx(espos_n2k::TwaiReceiverConfig::waveshare_touch_lcd_7b());
+  // Pins live here, not in espos_n2k: the 7B's on-board TJA1051T CAN
+  // transceiver is wired to GPIO22/21, which is a fact about this board.
+  static espos_n2k::TwaiReceiver n2k_rx(
+      {.tx_pin = GPIO_NUM_22, .rx_pin = GPIO_NUM_21});
   static espos_n2k::TwaiTransmitter n2k_tx;
   static espos_n2k::CandumpTcpServer n2k_server(&n2k_rx, &n2k_tx);
   s_n2k_rx = &n2k_rx;
