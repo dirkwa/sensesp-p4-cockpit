@@ -20,12 +20,16 @@ Companion projects:
   (with host tests), panel-specific ones stay here. Fixes found while
   debugging this panel follow the same rule — see
   [Fixing espOS from here](#fixing-espos-from-here).
-- **sensesp-cockpit-display / -n2k-gateway / -wyoming-satellite** — the 1.x
-  Arduino libraries, now folded into `components/` here (`cockpit_hal`,
-  `cockpit_voice`, `cockpit_n2k`). They stay in place for 1.x on `master`;
-  2.x does not link them. **sensesp-ble-gateway** is deliberately not
-  ported: 1.x linked it but never instantiated it, and BLE scanning
-  through the C6 is blocked upstream.
+- **sensesp-cockpit-display / -n2k-gateway** — the 1.x Arduino libraries,
+  now folded into `components/` here (`cockpit_hal`, `cockpit_n2k`). They
+  stay in place for 1.x on `master`; 2.x does not link them.
+  **sensesp-wyoming-satellite** is archived: the voice satellite moved to
+  espOS as `espos_voice` (protocol, TCP server, esp-sr wake engine) plus
+  `espos_audio` (the `AudioDriver` contract). The board driver stays here
+  as `cockpit_hal::WaveshareAudio`, which implements that contract.
+  **sensesp-ble-gateway** is deliberately not ported: 1.x linked it but
+  never instantiated it, and BLE scanning through the C6 is blocked
+  upstream.
 
 ## Where to start reading
 
@@ -207,7 +211,7 @@ designer refuses to push widget kinds the device doesn't advertise.
 | `esp_timer` 1 ms  | no            | `lv_tick_inc(1)` only — lock-free |
 | `espos_skws` task | no            | espOS SignalK stream; subscription callbacks run here and `ui::post` their work |
 | `audio` task      | no            | Drains the chime clip queue; blocking I2S write to the ES8311. `WaveshareAudio::play_pcm` (called from the UI task) copies + enqueues, never blocks |
-| `wyoming_*` tasks | no            | Voice satellite: TCP server, mic streaming, wake feed/fetch (esp-sr AFE) |
+| `wyoming_*` tasks | no            | Voice satellite (`espos_voice`): TCP server, mic streaming, wake feed/fetch (esp-sr AFE) |
 | `twai_rx` / candump | no          | N2K receive + per-client fan-out to the candump TCP server |
 
 ## Fixing espOS from here
