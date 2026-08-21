@@ -279,9 +279,12 @@ when the bump lands.
 - **No AI attribution anywhere.** No "Co-Authored-By: Claude", no
   CLAUDE.md content in the repo body, no AI-tool mentions in commits
   / PRs / code.
-- **Code review**: `cr review --plain --type committed --base master`
-  on a feature branch. Save output the first time; `cr` is rate-limited
-  ~50 min between runs.
+- **Code review**: `cr review --committed --base master` on a feature
+  branch (plain text is the default; the older `--plain --type committed`
+  spelling now errors out). Redirect to a file the first time — `cr` is
+  rate-limited ~50 min between runs, so unsaved output is gone for an
+  hour. An arg-parse error fails locally before contacting CodeRabbit and
+  does not consume that window.
 - **Comments**: WHY only. No echo comments, no "added for issue #X"
   rot bait, no multi-paragraph docstrings.
 
