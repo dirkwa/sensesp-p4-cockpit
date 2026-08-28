@@ -127,6 +127,7 @@ void record_interval(State& st, uint32_t ms) {
 
 void run_connection(State& st, int sock) {
   int64_t prev_frame_us = 0;
+  bool wrong_size_warned = false;
 
   while (st.running.load()) {
     uint8_t len_buf[4];
@@ -149,6 +150,24 @@ void run_connection(State& st, int sock) {
 
     st.frames_received.fetch_add(1);
     st.bytes_received.fetch_add(frame_len + 4);
+
+    // A frame that isn't panel-sized would "decode fine" into garbage rows
+    // (and break the 1:1 touch mapping); surface a misconfigured capture as
+    // an error instead. Header parse only — no hardware involved.
+    jpeg_decode_picture_info_t info = {};
+    if (jpeg_decoder_get_info(st.rx_buf, frame_len, &info) != ESP_OK ||
+        info.width != kWidth || info.height != kHeight) {
+      st.decode_errors.fetch_add(1);
+      if (!wrong_size_warned) {
+        wrong_size_warned = true;
+        ESP_LOGW(TAG, "frame is %ux%u, need %ux%u — fix the capture resolution",
+                 (unsigned)info.width, (unsigned)info.height, (unsigned)kWidth,
+                 (unsigned)kHeight);
+      }
+      uint8_t nack = 1;
+      if (send(sock, &nack, 1, 0) != 1) return;  // keep the pacing loop alive
+      continue;
+    }
 
     jpeg_decode_cfg_t decode_cfg = {
         .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,

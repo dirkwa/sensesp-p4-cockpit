@@ -2513,6 +2513,11 @@ constexpr uint32_t kStreamMagic = 0x53545257;  // tags a stream ctx in user_data
 // UI thread only; the network callback reads it.
 struct StreamShared {
   std::atomic<bool> alive{true};
+  // Bumped on every stop/reset (UI thread). A frame posted under an older
+  // epoch must not touch the image: its pixels live in the PREVIOUS client
+  // session's buffers, which the stream task frees on exit — rendering them
+  // is a use-after-free read of recycled PSRAM.
+  std::atomic<uint32_t> epoch{0};
   SemaphoreHandle_t render_sem = nullptr;
   lv_obj_t* img = nullptr;         // UI thread only
   lv_obj_t* placeholder = nullptr; // UI thread only
@@ -2553,8 +2558,9 @@ void stream_try_start(StreamCtx* c) {
         // is reused two frames from now; the semaphore paces us to the UI
         // task's queue drain, which also paces the ACK to real render speed.
         if (!sh->alive.load()) return;
-        ui::post([sh, f]() {
-          if (sh->alive.load()) {
+        const uint32_t ep = sh->epoch.load();
+        ui::post([sh, f, ep]() {
+          if (sh->alive.load() && ep == sh->epoch.load()) {
             int idx = (f.px == sh->buf[0]) ? 0 : (f.px == sh->buf[1] ? 1 : -1);
             if (idx < 0) {  // first sighting of this decode buffer
               idx = sh->buf[0] ? 1 : 0;
@@ -2588,6 +2594,17 @@ void stream_do_stop(StreamCtx* c) {
   if (!c->started) return;
   stream_client_stop();
   c->started = false;
+  // The stopped client frees its decode buffers on exit, and the next
+  // session allocates fresh ones — drop every reference to the old pixels
+  // NOW (src, dsc mapping) and invalidate frames already in the post queue
+  // via the epoch, or LVGL re-renders freed PSRAM on the next show.
+  c->sh->epoch.fetch_add(1);
+  c->sh->buf[0] = c->sh->buf[1] = nullptr;
+  lv_image_set_src(c->sh->img, nullptr);
+  if (c->sh->placeholder) {
+    lv_label_set_text(c->sh->placeholder, "connecting…");
+    lv_obj_clear_flag(c->sh->placeholder, LV_OBJ_FLAG_HIDDEN);
+  }
 }
 
 void stream_watch_tick(StreamCtx* c) {
