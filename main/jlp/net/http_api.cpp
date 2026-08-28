@@ -715,7 +715,9 @@ esp_err_t stream_soak_get(httpd_req_t* req) {
       if (host.empty()) {
         ok = false;
         err = "no host: pass ?host= or wait for SK discovery";
-      } else if (!stream_client_start(host.c_str(), soak_port, nullptr)) {
+      } else if (!stream_client_start(host.c_str(), soak_port,
+                                      (uint32_t)LV_HOR_RES, (uint32_t)LV_VER_RES,
+                                      nullptr)) {
         ok = false;
         err = "start failed (already running?)";
       }

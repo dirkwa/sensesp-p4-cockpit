@@ -2552,8 +2552,11 @@ void stream_try_start(StreamCtx* c) {
   if (host.empty()) return;  // SK not discovered yet; the watch timer retries
 
   auto sh = c->sh;
+  // Capture must match the PANEL resolution (not the widget size) for the
+  // 1:1 touch mapping; the client rejects frames of any other geometry.
   bool ok = stream_client_start(
-      host.c_str(), c->port, [sh](const StreamFrame& f) {
+      host.c_str(), c->port, (uint32_t)LV_HOR_RES, (uint32_t)LV_VER_RES,
+      [sh](const StreamFrame& f) {
         // Network task. The posted swap must run before this frame's buffer
         // is reused two frames from now; the semaphore paces us to the UI
         // task's queue drain, which also paces the ACK to real render speed.

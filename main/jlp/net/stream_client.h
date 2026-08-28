@@ -49,9 +49,13 @@ struct StreamStats {
 // profile it demonstrably survives.
 //
 // Singleton by design: the P4 has one JPEG decode engine and JLP shows one
-// screen at a time. `cb` runs on the stream task and must never touch
-// LVGL directly; pass nullptr to decode-and-discard (link soak).
-bool stream_client_start(const char* host, uint16_t port, StreamFrameCb cb);
+// screen at a time. `width`/`height` are the expected frame geometry — the
+// panel resolution, since the capture must match it 1:1 for touch mapping;
+// frames of any other size are rejected per frame. `cb` runs on the stream
+// task and must never touch LVGL directly; pass nullptr to
+// decode-and-discard (link soak).
+bool stream_client_start(const char* host, uint16_t port, uint32_t width,
+                         uint32_t height, StreamFrameCb cb);
 
 // Non-blocking: requests the stream task to exit; the task frees its own
 // buffers on the way out (safe to call from the UI task). A start() during

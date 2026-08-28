@@ -24,11 +24,6 @@ namespace jlp {
 namespace {
 
 constexpr size_t kMaxFrameBytes = 128 * 1024;
-constexpr uint32_t kWidth = 1024;
-constexpr uint32_t kHeight = 600;
-// The HW decoder emits heights padded to a multiple of 16.
-constexpr uint32_t kHeightPadded = 608;
-constexpr size_t kDecodedBytes = kWidth * kHeightPadded * 2;
 constexpr int kMaxBackoffMs = 10000;
 constexpr int kRecvTimeoutS = 10;
 constexpr size_t kIntervalRing = 256;
@@ -36,6 +31,13 @@ constexpr size_t kIntervalRing = 256;
 struct State {
   std::string host;
   uint16_t port = 0;
+  // Frame geometry = the panel resolution (passed in by the caller so this
+  // module stays display-agnostic; the 4B panel is 720x720, not 1024x600).
+  // The HW decoder emits heights padded to a multiple of 16.
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t height_padded = 0;
+  size_t decoded_bytes = 0;
   StreamFrameCb cb;
 
   std::atomic<bool> running{true};
@@ -156,16 +158,19 @@ void run_connection(State& st, int sock) {
     // an error instead. Header parse only — no hardware involved.
     jpeg_decode_picture_info_t info = {};
     if (jpeg_decoder_get_info(st.rx_buf, frame_len, &info) != ESP_OK ||
-        info.width != kWidth || info.height != kHeight) {
+        info.width != st.width || info.height != st.height) {
       st.decode_errors.fetch_add(1);
       if (!wrong_size_warned) {
         wrong_size_warned = true;
         ESP_LOGW(TAG, "frame is %ux%u, need %ux%u — fix the capture resolution",
-                 (unsigned)info.width, (unsigned)info.height, (unsigned)kWidth,
-                 (unsigned)kHeight);
+                 (unsigned)info.width, (unsigned)info.height, (unsigned)st.width,
+                 (unsigned)st.height);
       }
-      uint8_t nack = 1;
-      if (send(sock, &nack, 1, 0) != 1) return;  // keep the pacing loop alive
+      // Still an ACK: the server cannot tell a rejected frame from a shown
+      // one, and withholding it would stall the pacing loop on a
+      // misconfigured capture instead of surfacing the error counter.
+      uint8_t ack = 1;
+      if (send(sock, &ack, 1, 0) != 1) return;
       continue;
     }
 
@@ -185,9 +190,9 @@ void run_connection(State& st, int sock) {
       if (st.cb) {
         StreamFrame frame = {
             .px = out,
-            .w = kWidth,
-            .h = kHeight,
-            .h_padded = kHeightPadded,
+            .w = st.width,
+            .h = st.height,
+            .h_padded = st.height_padded,
             .bytes = out_size,
         };
         st.cb(frame);
@@ -262,7 +267,9 @@ void stream_task(void* arg) {
 
 }  // namespace
 
-bool stream_client_start(const char* host, uint16_t port, StreamFrameCb cb) {
+bool stream_client_start(const char* host, uint16_t port, uint32_t width,
+                         uint32_t height, StreamFrameCb cb) {
+  if (width == 0 || height == 0) return false;
   taskENTER_CRITICAL(&g_mux);
   bool busy = g_state != nullptr;
   taskEXIT_CRITICAL(&g_mux);
@@ -271,6 +278,10 @@ bool stream_client_start(const char* host, uint16_t port, StreamFrameCb cb) {
   auto* st = new State();
   st->host = host;
   st->port = port;
+  st->width = width;
+  st->height = height;
+  st->height_padded = (height + 15) & ~15u;
+  st->decoded_bytes = (size_t)width * st->height_padded * 2;
   st->cb = std::move(cb);
 
   jpeg_decode_engine_cfg_t engine_cfg = {
@@ -292,9 +303,11 @@ bool stream_client_start(const char* host, uint16_t port, StreamFrameCb cb) {
   jpeg_decode_memory_alloc_cfg_t out_cfg = {.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER};
   size_t got = 0;
   st->rx_buf = (uint8_t*)jpeg_alloc_decoder_mem(kMaxFrameBytes, &rx_cfg, &got);
-  st->out_buf[0] = (uint8_t*)jpeg_alloc_decoder_mem(kDecodedBytes, &out_cfg, &st->out_buf_size);
+  st->out_buf[0] =
+      (uint8_t*)jpeg_alloc_decoder_mem(st->decoded_bytes, &out_cfg, &st->out_buf_size);
   size_t out1_size = 0;
-  st->out_buf[1] = (uint8_t*)jpeg_alloc_decoder_mem(kDecodedBytes, &out_cfg, &out1_size);
+  st->out_buf[1] =
+      (uint8_t*)jpeg_alloc_decoder_mem(st->decoded_bytes, &out_cfg, &out1_size);
   if (!st->rx_buf || !st->out_buf[0] || !st->out_buf[1]) {
     ESP_LOGE(TAG, "buffer allocation failed");
     free_state(st);
