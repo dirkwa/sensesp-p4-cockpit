@@ -280,6 +280,38 @@ Displayed value = `(raw × scale) + offset`, formatted to `decimals`, then `unit
 - Draggable speaker-volume slider (0–100), applied at the codec. Panel-local; caption above the bar. No `bind`.
 - Extra fields: `label` (default `VOLUME`), `bg_color` (tile), `fg_color` (slider indicator/knob).
 
+#### `stream`
+- Remote view: shows a live MJPEG stream rendered on the SignalK box (the
+  `signalk-esp32-stream` plugin captures a webapp — Freeboard-SK, KIP,
+  Grafana — with Xvfb + Chromium + ffmpeg) and forwards touches back, so the
+  panel can display things it cannot render natively. No `bind`, no SignalK
+  data path.
+- Wire protocol (v2): TCP to `host:port`, frames as `[u32 BE length][baseline
+  JPEG]`; the panel sends a **1-byte ACK after each frame is handed to the
+  renderer and the server sends only the latest frame per ACK** — at most one
+  frame is in flight, which self-paces the fps to the panel and avoids the
+  sustained-inbound-TCP profile that wedges the esp-hosted SDIO link
+  (esp-hosted-mcu#184). Frames are decoded by the P4's hardware JPEG engine
+  (baseline JPEG only, ≤128 KB per frame).
+- **Streams only while its screen is visible.** Switching to another tab (or
+  a layout swap that drops the widget) closes the TCP connection; switching
+  back reconnects (1 s → 10 s backoff, "connecting…"/"no signal" caption over
+  the last frame meanwhile). Only one stream widget decodes at a time — the
+  hardware decoder and the client are singletons.
+- Touch: while the screen is visible, presses on the widget are forwarded as
+  8-byte UDP packets to `host:touch_port` (LE `u16 x`, `u16 y`, `u8 type`
+  0=down/1=move/2=up, 3 pad) in **capture coordinates** — the capture
+  resolution must equal the panel resolution (1024×600) for the 1:1 mapping.
+- Sized for full-screen use (`x:0,y:0,w:1024,h:600` alone on its own screen);
+  frames are shown at native size, not scaled.
+- Extra fields:
+  - `host` (string, optional) — stream server; empty/omitted = the SignalK
+    server the panel is connected to.
+  - `port` (int, default `5004`) — MJPEG TCP port.
+  - `touch` (bool, default `true`) — forward touches.
+  - `touch_port` (int, default `5005`) — UDP touch port.
+  - `bg_color` (letterbox/background), `fg_color` (status caption).
+
 ### Validation rules
 
 A layout MUST be rejected if any of the following holds:
