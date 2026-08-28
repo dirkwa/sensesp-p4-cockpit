@@ -24,7 +24,7 @@ void mdns_announce_start(uint16_t api_port) {
           // device will accept.
           {"schema",   "1"},
           {"widgets",  "label,value,toggle,arc,bar,bargroup,button,notifications,"
-                       "anchor,anchor_track,voice,speaker,mic,volume"},
+                       "anchor,anchor_track,voice,speaker,mic,volume,slider"},
           {"firmware", "p4-cockpit-jlp-2.0.0"},
           {"api",      "/layout,/hello,/healthz,/screenshot"},
       };
