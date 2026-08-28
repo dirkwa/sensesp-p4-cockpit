@@ -149,6 +149,7 @@ lv_obj_t* build_label(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
   const char* path = spec["bind"] | (const char*)nullptr;
   const char* caption = spec["label"] | (const char*)nullptr;
   const Colors colors = parse_colors(spec);
+  const bool show_description = spec["show_description"] | false;
 
   // No bind: single static text label, return that directly.
   if (!path) {
@@ -194,9 +195,11 @@ lv_obj_t* build_label(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
   // updating SK paths (switch states, SOC) might not see a delta
   // for a long time; without this the label sits at "—" until the
   // value changes, which can be never.
-  {
+  if (show_description) {
     const std::string& desc = zones().description(std::string(path));
     lv_label_set_text(val, desc.empty() ? "—" : desc.c_str());
+  } else {
+    lv_label_set_text(val, "—");
   }
   if (caption && *caption) {
     lv_obj_align(val, LV_ALIGN_TOP_LEFT, 0, 20);
@@ -211,8 +214,9 @@ lv_obj_t* build_label(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
     Disp d;
     lv_obj_t* tile;
     Colors colors;
+    bool show_description;
   };
-  auto* lctx = new LabelCtx{parse_display(spec), root, colors};
+  auto* lctx = new LabelCtx{parse_display(spec), root, colors, show_description};
   lv_obj_set_user_data(val, lctx);
   lv_obj_add_event_cb(
       val,
@@ -229,11 +233,15 @@ lv_obj_t* build_label(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
         auto* lc = static_cast<LabelCtx*>(lv_obj_get_user_data(w));
         float raw = lv_subject_get_float(s);
         float v = raw * lc->d.scale + lc->d.offset;
-        // Prefer the SK meta description over the formatted value.
-        const std::string& desc = zones().description(lc->d.path);
-        if (!desc.empty()) {
-          lv_label_set_text(w, desc.c_str());
-        } else {
+        bool wrote_desc = false;
+        if (lc->show_description) {
+          const std::string& desc = zones().description(lc->d.path);
+          if (!desc.empty()) {
+            lv_label_set_text(w, desc.c_str());
+            wrote_desc = true;
+          }
+        }
+        if (!wrote_desc) {
           lv_label_set_text_fmt(w, "%.*f %s", lc->d.decimals, v, lc->d.unit);
         }
         // Zones are in raw SK units (e.g. ratio 0..1 for SOC); match
@@ -260,16 +268,14 @@ lv_obj_t* build_label(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
 
 // ---- value ----
 //
-// Big-number readout tile. Differs from `label` in three ways:
+// Big-number readout tile. Differs from `label` in two ways:
 //
-//   - `label` is text-first: a static caption when there's no bind,
-//     or the SK meta `description` (when present) once bound. A
-//     bound label prefers the human-readable name over the number
-//     (e.g. "BMS DnC" instead of "1.0").
-//   - `value` is number-first: ALWAYS shows the formatted live
-//     value as the dominant glyph in the tile. Caption is the small
-//     top-left label; unit is small bottom-right; the big number
-//     centers between them. Description is ignored.
+//   - `value` centers the formatted number as the dominant glyph in
+//     the tile; caption is the small top-left label, unit is small
+//     bottom-right. `label` puts the caption on top and the value
+//     below it, sized like a caption+value pair rather than one big
+//     readout. `label` also has a `show_description` opt-in the
+//     `value` widget doesn't need — `value` is always number-first.
 //   - Zone state tints the WHOLE tile background by default (matches
 //     the helm convention "if it's red, look at it now").
 //

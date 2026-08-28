@@ -201,9 +201,10 @@ Displayed value = `(raw × scale) + offset`, formatted to `decimals`, then `unit
 ### Widget kinds
 
 #### `label`
-- Extra fields: none.
+- Extra fields:
+  - `show_description` (bool, optional, default `false`) — show the SK meta `description` instead of the formatted value (e.g. a switch-state path reads "BMS DnC" instead of "1.0").
 - Renders `label` (caption) above the formatted value from `bind`. If only `label` is set, renders a static caption.
-- When `bind` resolves to a path with a `description` field in SK meta, the description text is preferred over the formatted numeric value (so a switch-state path shows "BMS DnC" instead of "1.0").
+- By default shows the formatted live value from `bind`, same as `value`. Set `show_description` to prefer the SK meta `description` text instead; if the path has no description, falls back to the formatted value.
 - `display.font_size` (int, optional) — pick a compiled Montserrat size (14, 16, 20, 28, 36). Otherwise autoscales to the widget's height.
 - Subject kind: `Float` if `display` set, else `String`.
 

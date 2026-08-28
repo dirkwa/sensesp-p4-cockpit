@@ -579,7 +579,7 @@ esp_err_t screenshot_get(httpd_req_t* req) {
 // call. ArduinoJson's `serialized()` splices it in verbatim.
 constexpr const char* kWidgetCatalogJson =
     "{"
-      "\"label\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bind\",\"display\",\"bg_color\",\"fg_color\"]},"
+      "\"label\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bind\",\"display\",\"show_description\",\"bg_color\",\"fg_color\"]},"
       "\"value\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bind\",\"display\",\"bg_color\",\"fg_color\"]},"
       "\"toggle\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bind\",\"bg_color\",\"fg_color\"]},"
       "\"arc\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bind\",\"display\",\"min\",\"max\",\"start_angle\",\"end_angle\",\"ticks\",\"tick_labels\",\"bands\",\"bg_color\",\"fg_color\"]},"
