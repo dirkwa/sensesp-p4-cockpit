@@ -301,11 +301,13 @@ Displayed value = `(raw × scale) + offset`, formatted to `decimals`, then `unit
 - Touch: while the screen is visible, presses on the widget are forwarded as
   8-byte UDP packets to `host:touch_port` (LE `u16 x`, `u16 y`, `u8 type`
   0=down/1=move/2=up, 3 pad) in **capture coordinates** — the capture
-  resolution must equal the panel resolution (1024×600) for the 1:1 mapping.
-- Sized for full-screen use (`x:0,y:0,w:1024,h:600` alone on its own screen);
-  frames are shown at native size, not scaled. Frames that are not exactly
-  panel-sized are rejected (counted as decode errors) — they would render as
-  garbage rows and break the touch mapping.
+  resolution must equal the panel resolution (`display.w`×`display.h` from
+  `/hello`) for the 1:1 mapping.
+- Sized for full-screen use: place it alone on its own screen at the panel
+  resolution (`x:0,y:0,w:1024,h:600` on the reference 7B panel); frames are
+  shown at native size, not scaled. Frames that are not exactly panel-sized
+  are rejected (counted as decode errors) — they would render as garbage
+  rows and break the touch mapping.
 - Trust model: `host`/`port`/`touch_port` come from the layout JSON, which —
   like everything on `:8081` — is unauthenticated by design (boat-LAN trust,
   same as `POST /layout` itself). The override exists so a dedicated capture

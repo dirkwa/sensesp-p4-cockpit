@@ -386,11 +386,11 @@ ApplyResult LayoutManager::apply(const std::string& json, ApplySource src) {
   if (old_root) lv_obj_delete(old_root);
 
   // Single-screen layouts have no switcher, so nothing else ever marks
-  // their widgets visible. Multi-screen roots carry the ScreenSwitcherCtx
-  // in user_data and got switcher_show(0) during the staging build — a
-  // stream widget's start then races the old layout's teardown and
-  // retries on its watch timer, so no extra call is needed there.
-  if (!lv_obj_get_user_data(current_root_)) {
+  // their widgets visible. Multi-screen roots got switcher_show(0) during
+  // the staging build — a stream widget's start then races the old
+  // layout's teardown and retries on its watch timer, so no extra call is
+  // needed there.
+  if (screens.size() == 1) {
     stream_widgets_notify_visibility(current_root_, true);
   }
 

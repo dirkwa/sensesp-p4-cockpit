@@ -42,6 +42,7 @@ struct State {
 
   std::atomic<bool> running{true};
   std::atomic<int> sock{-1};
+  std::atomic<uint32_t> peer_be{0};  // resolved server IPv4, network order
 
   jpeg_decoder_handle_t decoder = nullptr;
   uint8_t* rx_buf = nullptr;
@@ -77,7 +78,7 @@ void free_state(State* st) {
   delete st;
 }
 
-int connect_to_server(const State& st) {
+int connect_to_server(State& st) {
   struct addrinfo hints = {};
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
@@ -102,6 +103,9 @@ int connect_to_server(const State& st) {
   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
   err = connect(sock, result->ai_addr, result->ai_addrlen);
+  if (err == 0 && result->ai_family == AF_INET) {
+    st.peer_be.store(((struct sockaddr_in*)result->ai_addr)->sin_addr.s_addr);
+  }
   freeaddrinfo(result);
   if (err != 0) {
     close(sock);
@@ -244,17 +248,27 @@ void stream_task(void* arg) {
 
     if (had_session) st->reconnects.fetch_add(1);
     had_session = true;
-    backoff_ms = 1000;
     st->sock.store(sock);
     st->connected.store(true);
     ESP_LOGI(TAG, "connected to %s:%u", st->host.c_str(), st->port);
 
+    const uint32_t frames_before = st->frames_decoded.load();
     run_connection(*st, sock);
 
     st->connected.store(false);
     st->sock.store(-1);
     close(sock);
     ESP_LOGI(TAG, "disconnected (%u frames total)", (unsigned)st->frames_decoded.load());
+
+    // Pace session drops too: a peer that accepts and then immediately
+    // fails (close, bad framing every time) must not turn into a tight
+    // connect/close loop through the hosted link. Only a session that
+    // actually delivered frames resets the backoff.
+    if (st->frames_decoded.load() != frames_before) backoff_ms = 1000;
+    else backoff_ms = std::min(backoff_ms * 2, kMaxBackoffMs);
+    for (int waited = 0; waited < backoff_ms && st->running.load(); waited += 100) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
   }
 
   taskENTER_CRITICAL(&g_mux);
@@ -354,6 +368,27 @@ void stream_client_stop() {
   // within one frame, and a dead server is bounded by the 10 s recv
   // timeout. The 1.x client used the same flag-only stop for this reason.
   ESP_LOGI(TAG, "stop requested");
+}
+
+bool stream_client_stop_diagnostic() {
+  taskENTER_CRITICAL(&g_mux);
+  State* st = g_state;
+  const bool diag = st && !st->cb;
+  if (diag) st->running.store(false);
+  taskEXIT_CRITICAL(&g_mux);
+  if (!st) return true;  // nothing running counts as stopped
+  if (diag) ESP_LOGI(TAG, "stop requested (diagnostic)");
+  return diag;
+}
+
+bool stream_client_peer(uint32_t* addr_be) {
+  taskENTER_CRITICAL(&g_mux);
+  State* st = g_state;
+  const uint32_t a = (st && st->connected.load()) ? st->peer_be.load() : 0;
+  taskEXIT_CRITICAL(&g_mux);
+  if (a == 0) return false;
+  *addr_be = a;
+  return true;
 }
 
 StreamStats stream_client_stats() {

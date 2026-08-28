@@ -2,11 +2,12 @@
 
 #include <math.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
+#include <vector>
 
 #include <arpa/inet.h>
-#include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -2506,8 +2507,6 @@ lv_obj_t* build_voice(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
 
 namespace {
 
-constexpr uint32_t kStreamMagic = 0x53545257;  // tags a stream ctx in user_data
-
 // Shared with posted lambdas and the network callback via shared_ptr, so a
 // widget teardown can never leave them dangling. `alive` is written on the
 // UI thread only; the network callback reads it.
@@ -2529,7 +2528,7 @@ struct StreamShared {
 };
 
 struct StreamCtx {
-  uint32_t magic = kStreamMagic;
+  lv_obj_t* root = nullptr;
   std::string host;  // empty = follow the SK server
   uint16_t port = 5004;
   bool touch = true;
@@ -2538,11 +2537,15 @@ struct StreamCtx {
   bool visible = false;
   uint32_t watch_timer = 0;
   int udp_sock = -1;
-  struct sockaddr_in touch_addr = {};
-  bool touch_addr_ok = false;
   lv_point_t last_sent = {-32768, -32768};
   std::shared_ptr<StreamShared> sh;
 };
+
+// Live stream widgets (UI thread only). An explicit registry rather than a
+// magic tag in lv user_data: other widget kinds keep unrelated payloads in
+// that slot (the tab buttons even store bare ints), so probing it would be
+// a type-punned read of foreign objects.
+std::vector<StreamCtx*> g_stream_widgets;
 
 // All stream_* helpers below run on the UI thread.
 
@@ -2644,29 +2647,20 @@ void stream_set_visible(StreamCtx* c, bool vis) {
 }
 
 void stream_touch_send(StreamCtx* c, uint16_t x, uint16_t y, uint8_t type) {
+  // Reuse the stream task's resolved server address — never resolve a
+  // hostname on the UI thread (a slow DNS lookup here stalls LVGL until
+  // the watchdog fires). No connected stream also means there is nothing
+  // on the other end to click.
+  uint32_t peer_be = 0;
+  if (!stream_client_peer(&peer_be)) return;
   if (c->udp_sock < 0) {
     c->udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (c->udp_sock < 0) return;
   }
-  if (!c->touch_addr_ok) {
-    std::string host = c->host.empty() ? sk_server().host : c->host;
-    if (host.empty()) return;
-    c->touch_addr = {};
-    c->touch_addr.sin_family = AF_INET;
-    c->touch_addr.sin_port = htons(c->touch_port);
-    if (inet_pton(AF_INET, host.c_str(), &c->touch_addr.sin_addr) != 1) {
-      // Hostname, not a dotted IP. getaddrinfo can block, but only once per
-      // widget lifetime and only on a LAN resolver — accepted for v1.
-      struct addrinfo hints = {};
-      hints.ai_family = AF_INET;
-      hints.ai_socktype = SOCK_DGRAM;
-      struct addrinfo* res = nullptr;
-      if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res) return;
-      c->touch_addr.sin_addr = ((struct sockaddr_in*)res->ai_addr)->sin_addr;
-      freeaddrinfo(res);
-    }
-    c->touch_addr_ok = true;
-  }
+  struct sockaddr_in addr = {};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(c->touch_port);
+  addr.sin_addr.s_addr = peer_be;
   // Old wire format kept: LE u16 x, LE u16 y, u8 type (0 down/1 move/2 up),
   // 3 pad bytes. The server's XTEST injector already speaks it.
   uint8_t pkt[8] = {};
@@ -2675,8 +2669,7 @@ void stream_touch_send(StreamCtx* c, uint16_t x, uint16_t y, uint8_t type) {
   pkt[2] = y & 0xff;
   pkt[3] = y >> 8;
   pkt[4] = type;
-  sendto(c->udp_sock, pkt, sizeof(pkt), 0, (struct sockaddr*)&c->touch_addr,
-         sizeof(c->touch_addr));
+  sendto(c->udp_sock, pkt, sizeof(pkt), 0, (struct sockaddr*)&addr, sizeof(addr));
 }
 
 void stream_touch_event(lv_event_t* e) {
@@ -2722,6 +2715,7 @@ lv_obj_t* build_stream(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
   lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
 
   auto* c = new StreamCtx();
+  c->root = root;
   c->host = spec["host"] | "";
   c->port = (uint16_t)(spec["port"] | 5004);
   c->touch = spec["touch"] | true;
@@ -2756,12 +2750,16 @@ lv_obj_t* build_stream(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
     lv_obj_add_event_cb(img, stream_touch_event, LV_EVENT_PRESS_LOST, c);
   }
 
+  g_stream_widgets.push_back(c);
   lv_obj_set_user_data(root, c);
   lv_obj_add_event_cb(
       root,
       [](lv_event_t* e) {
         auto* c = static_cast<StreamCtx*>(lv_obj_get_user_data(
             static_cast<lv_obj_t*>(lv_event_get_target(e))));
+        g_stream_widgets.erase(
+            std::remove(g_stream_widgets.begin(), g_stream_widgets.end(), c),
+            g_stream_widgets.end());
         if (c->watch_timer) cockpit_hal::ui::cancel(c->watch_timer);
         // After this, posted frame lambdas and the network callback see a
         // dead widget and only give the semaphore / return.
@@ -2777,11 +2775,8 @@ lv_obj_t* build_stream(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
 
 void stream_widgets_notify_visibility(lv_obj_t* container, bool visible) {
   if (!container) return;
-  const uint32_t n = lv_obj_get_child_count(container);
-  for (uint32_t i = 0; i < n; i++) {
-    lv_obj_t* ch = lv_obj_get_child(container, i);
-    auto* c = static_cast<StreamCtx*>(lv_obj_get_user_data(ch));
-    if (c && c->magic == kStreamMagic) stream_set_visible(c, visible);
+  for (auto* c : g_stream_widgets) {
+    if (lv_obj_get_parent(c->root) == container) stream_set_visible(c, visible);
   }
 }
 

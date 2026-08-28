@@ -62,6 +62,20 @@ bool stream_client_start(const char* host, uint16_t port, uint32_t width,
 // the brief wind-down returns false — retry on a timer.
 void stream_client_stop();
 
+// Stops only a diagnostic client — one started with a null frame callback
+// (the /stream_soak harness). Returns false without stopping anything when
+// the running client belongs to a stream widget: the widget's teardown
+// must drop its own pixel references first, so diagnostics may never yank
+// the client out from under it.
+bool stream_client_stop_diagnostic();
+
+// IPv4 of the currently-connected stream server, network byte order.
+// False when not connected. Lets the touch sender reuse the stream task's
+// DNS result instead of resolving on the UI thread (a slow lookup there
+// stalls LVGL until the watchdog fires) — and with no stream connected
+// there is nothing to click anyway.
+bool stream_client_peer(uint32_t* addr_be);
+
 StreamStats stream_client_stats();
 
 }  // namespace jlp

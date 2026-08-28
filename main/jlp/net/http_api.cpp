@@ -691,11 +691,12 @@ esp_err_t hello_get(httpd_req_t* req) {
 // GET /stream_soak?stop=1                        — stop it
 // GET /stream_soak                               — stats only
 //
-// Phase-0 harness for the stream widget: runs the real ACK-paced transport
-// + hardware JPEG decode against a test server and discards the frames, to
-// prove the hosted link survives hours of this inbound load
-// (esp-hosted-mcu#184) before any LVGL work exists. Host defaults to the
-// SK server — the stream plugin will live on the same box.
+// Link-soak diagnostic: runs the stream widget's real ACK-paced transport
+// and hardware JPEG decode with the frames discarded, so the hosted link
+// can be qualified under this inbound load (esp-hosted-mcu#184) without a
+// layout or a capture pipeline. Host defaults to the SK server. The stats
+// path also reports on a widget-owned stream; start/stop only ever touch
+// a diagnostic one.
 esp_err_t stream_soak_get(httpd_req_t* req) {
   bool ok = true;
   const char* err = nullptr;
@@ -704,7 +705,12 @@ esp_err_t stream_soak_get(httpd_req_t* req) {
   if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
     char val[80];
     if (httpd_query_key_value(q, "stop", val, sizeof(val)) == ESP_OK) {
-      stream_client_stop();
+      // Never yank a widget-owned client: the widget's own teardown must
+      // drop its pixel references first or LVGL keeps a freed buffer.
+      if (!stream_client_stop_diagnostic()) {
+        ok = false;
+        err = "stream is owned by the layout's widget";
+      }
     } else if (httpd_query_key_value(q, "start", val, sizeof(val)) == ESP_OK) {
       std::string host = sk_server().host;
       uint16_t soak_port = 5004;
