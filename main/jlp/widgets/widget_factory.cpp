@@ -605,6 +605,119 @@ lv_obj_t* build_volume(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
   return root;
 }
 
+// ---- slider ----
+//
+// volume's look and feel (caption + full-width draggable slider) bound to
+// an arbitrary SK path instead of the panel's own audio codec. Combines
+// arc/bar's read side (subject-driven knob position, display scale/offset,
+// zone tint) with a PUT-on-release write side.
+//
+// While the user is actively dragging, subject updates are ignored so an
+// in-flight SK echo can't fight the gesture (`dragging` gate below); on
+// release the raw value is PUT (inverse of the display transform:
+// raw = (v - offset) / scale) and the subject resumes driving the knob —
+// which self-corrects if the PUT is ever rejected, with no separate
+// reconcile timer needed (unlike toggle, whose binary LVGL self-flip quirk
+// that timer exists for doesn't apply to a continuously dragged control).
+struct SliderCtx {
+  Disp display;
+  float min;  // display-space
+  float max;
+  Colors colors;
+  std::string path;
+  lv_subject_t* sub;
+  bool dragging;
+};
+
+lv_obj_t* build_slider(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
+  const char* path = spec["bind"] | (const char*)nullptr;
+  if (!path) { *err = "slider: bind required"; return nullptr; }
+  const Colors colors = parse_colors(spec);
+  lv_subject_t* sub = ctx.reg.get_or_create(path, SubjectKind::Float);
+  if (!sub) { *err = std::string("kind conflict on ") + path; return nullptr; }
+  ctx.live_paths.insert(path);
+
+  lv_obj_t* root = lv_obj_create(ctx.parent);
+  apply_geometry(root, spec);
+  lv_obj_set_style_bg_color(root, lv_color_hex(colors.bg), LV_PART_MAIN);
+  lv_obj_set_style_border_width(root, 0, LV_PART_MAIN);
+  lv_obj_set_style_outline_width(root, 0, LV_PART_MAIN);
+  lv_obj_set_style_outline_pad(root, 0, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(root, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(root, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(root, 8, LV_PART_MAIN);
+  lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+
+  const char* caption = spec["label"] | (const char*)nullptr;
+  if (caption) {
+    lv_obj_t* l = lv_label_create(root);
+    lv_obj_set_style_text_color(l, lv_color_hex(colors.fg), LV_PART_MAIN);
+    lv_obj_set_style_text_font(l, font_from_spec(spec, &lv_font_montserrat_20),
+                               LV_PART_MAIN);
+    lv_label_set_text(l, caption);
+    lv_obj_align(l, LV_ALIGN_TOP_LEFT, 0, 0);
+  }
+
+  lv_obj_t* sld = lv_slider_create(root);
+  lv_slider_set_range(sld, 0, kBarSteps);
+  lv_obj_set_width(sld, LV_PCT(100));
+  lv_obj_align(sld, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_obj_set_style_bg_color(sld, lv_color_hex(colors.fg), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(sld, lv_color_hex(colors.fg), LV_PART_KNOB);
+
+  auto* sc = new SliderCtx{parse_display(spec), spec["min"] | 0.f,
+                           spec["max"] | 100.f, colors, path, sub, false};
+  lv_obj_set_user_data(sld, sc);
+  lv_obj_add_event_cb(
+      sld,
+      [](lv_event_t* e) {
+        delete static_cast<SliderCtx*>(lv_obj_get_user_data(
+            static_cast<lv_obj_t*>(lv_event_get_target(e))));
+      },
+      LV_EVENT_DELETE, nullptr);
+
+  lv_subject_add_observer_obj(
+      sub,
+      [](lv_observer_t* obs, lv_subject_t* s) {
+        auto* w = lv_observer_get_target_obj(obs);
+        auto* sc = static_cast<SliderCtx*>(lv_obj_get_user_data(w));
+        if (sc->dragging) return;
+        float raw = lv_subject_get_float(s);
+        float v = raw * sc->display.scale + sc->display.offset;
+        lv_slider_set_value(w, scale_to_steps(v, sc->min, sc->max),
+                            LV_ANIM_OFF);
+        uint32_t fallback = sc->colors.fg != kFgHex ? sc->colors.fg
+                                                     : kAccentHex;
+        uint32_t c = zone_color(sc->display.path, raw, fallback);
+        lv_obj_set_style_bg_color(w, lv_color_hex(c), LV_PART_INDICATOR);
+      },
+      sld, nullptr);
+
+  lv_obj_add_event_cb(
+      sld,
+      [](lv_event_t* e) {
+        auto* w = static_cast<lv_obj_t*>(lv_event_get_target(e));
+        static_cast<SliderCtx*>(lv_obj_get_user_data(w))->dragging = true;
+      },
+      LV_EVENT_PRESSING, nullptr);
+  auto commit_slider_cb = [](lv_event_t* e) {
+    auto* w = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    auto* sc = static_cast<SliderCtx*>(lv_obj_get_user_data(w));
+    sc->dragging = false;
+    int32_t steps = lv_slider_get_value(w);
+    float span = sc->max - sc->min;
+    float v = sc->min + (span > 0 ? (steps / (float)kBarSteps) * span : 0.f);
+    float scale = sc->display.scale != 0.f ? sc->display.scale : 1.f;
+    put_float(sc->path, (v - sc->display.offset) / scale);
+  };
+  // A drag that leaves the widget never emits RELEASED; without PRESS_LOST
+  // the last position would apply visually but never PUT.
+  lv_obj_add_event_cb(sld, commit_slider_cb, LV_EVENT_RELEASED, nullptr);
+  lv_obj_add_event_cb(sld, commit_slider_cb, LV_EVENT_PRESS_LOST, nullptr);
+
+  return root;
+}
+
 lv_obj_t* build_toggle(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
   const char* path = spec["bind"] | (const char*)nullptr;
   if (!path) { *err = "toggle: bind required"; return nullptr; }
@@ -2505,6 +2618,7 @@ lv_obj_t* build_widget(BuildCtx& ctx, JsonObjectConst spec,
     return build_speaker(ctx, spec, err);
   if (t == "mic" || t == "mute_mic") return build_mic(ctx, spec, err);
   if (t == "volume")       return build_volume(ctx, spec, err);
+  if (t == "slider")       return build_slider(ctx, spec, err);
   *err = std::string("unknown widget kind: ") + t;
   return nullptr;
 }

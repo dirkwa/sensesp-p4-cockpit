@@ -598,7 +598,8 @@ constexpr const char* kWidgetCatalogJson =
       // the aliases for anyone reading an old layout.
       "\"speaker\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bg_color\",\"fg_color\"]},"
       "\"mic\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bg_color\",\"fg_color\"]},"
-      "\"volume\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bg_color\",\"fg_color\"]}"
+      "\"volume\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bg_color\",\"fg_color\"]},"
+      "\"slider\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bind\",\"display\",\"min\",\"max\",\"bg_color\",\"fg_color\"]}"
     "}";
 
 static esp_err_t screen_post(httpd_req_t* req) {

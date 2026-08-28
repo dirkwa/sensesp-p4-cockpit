@@ -317,6 +317,16 @@ Displayed value = `(raw × scale) + offset`, formatted to `decimals`, then `unit
 - Draggable speaker-volume slider (0–100), applied at the codec. Panel-local; caption above the bar. No `bind`.
 - Extra fields: `label` (default `VOLUME`), `bg_color` (tile), `fg_color` (slider indicator/knob).
 
+#### `slider`
+- `volume`'s look and feel — caption above a full-width draggable slider — bound to an arbitrary SK path instead of the panel's own audio codec.
+- Extra fields:
+  - `bind` (string, required) — SK path read AND written (unlike `bar`/`arc`, which are read-only).
+  - `min`, `max` (float, required) — value range, in display-space (after `display.scale`/`offset`), same convention as `bar`/`arc`.
+  - `display` (object, optional) — `scale`/`offset` map the path's raw unit onto the slider's `min`–`max` UI range (e.g. `scale: 100` for a path reported as a 0–1 ratio); `decimals`/`unit` are accepted for schema parity with `bar`/`arc` but unused here — the widget shows no value text, only the knob position.
+  - `bg_color` (tile), `fg_color` (slider indicator/knob, overridden by SK zone color when the bound path has zones).
+- Subject kind: `Float`.
+- While the operator is dragging, the knob follows the touch and ignores subject updates so an in-flight SK echo can't fight the gesture. Releasing (or a press lost off the widget) computes the raw value from the knob position (inverse of the display transform) and PUTs it once, then the widget resumes following the subject — which silently corrects the knob if the PUT is ever rejected. No separate reconcile timer.
+
 ### Validation rules
 
 A layout MUST be rejected if any of the following holds:
