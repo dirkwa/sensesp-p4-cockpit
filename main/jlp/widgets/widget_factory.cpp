@@ -139,10 +139,11 @@ int32_t scale_to_steps(float display_value, float min, float max) {
 //   - both                         -> small-font caption on top, body
 //                                     below (typical HMI tile layout)
 //
-// Body text is the SK meta `description` when one is published, else
-// the formatted numeric value. This makes a label bound to e.g.
-// `electrical.switches.bank.213.1.state` show "BMS DnC" instead of
-// "1.0", which matches what operators read on the physical relay.
+// Body text is the formatted value. `show_description` opts into the SK
+// meta `description` instead, for a path where the published name is what
+// operators read off the physical relay -- `electrical.switches.bank.213.1
+// .state` as "BMS DnC" rather than "1.0". Opt-in because the reverse
+// default silently hid the value on every path that publishes a name.
 // The tile background is zone-tinted from the current value, same as
 // toggle / arc / bar.
 lv_obj_t* build_label(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
@@ -268,16 +269,13 @@ lv_obj_t* build_label(BuildCtx& ctx, JsonObjectConst spec, std::string* err) {
 
 // ---- value ----
 //
-// Big-number readout tile. Differs from `label` in two ways:
+// Big-number readout tile. Exists alongside `label` because the two answer
+// different questions: `value` is for a number read at a glance from across
+// the cockpit, so it is always number-first and has no `show_description`;
+// `label` is caption-first and can show a published name instead.
 //
-//   - `value` centers the formatted number as the dominant glyph in
-//     the tile; caption is the small top-left label, unit is small
-//     bottom-right. `label` puts the caption on top and the value
-//     below it, sized like a caption+value pair rather than one big
-//     readout. `label` also has a `show_description` opt-in the
-//     `value` widget doesn't need — `value` is always number-first.
-//   - Zone state tints the WHOLE tile background by default (matches
-//     the helm convention "if it's red, look at it now").
+// Zone state tints the WHOLE tile background, matching the helm convention
+// "if it's red, look at it now".
 //
 // Schema fields: x, y, w, h, label?, bind (required), display? (with
 // scale/offset/decimals/unit auto-prefilled by the designer from SK
