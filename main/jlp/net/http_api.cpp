@@ -27,6 +27,8 @@
 #include "../layout/store.h"
 #include "../audio/chime.h"
 #include "../audio/voice_control.h"
+#include "sk_server.h"
+#include "stream_client.h"
 
 static const char* TAG = "jlp.http";
 
@@ -599,7 +601,8 @@ constexpr const char* kWidgetCatalogJson =
       "\"speaker\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bg_color\",\"fg_color\"]},"
       "\"mic\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bg_color\",\"fg_color\"]},"
       "\"volume\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bg_color\",\"fg_color\"]},"
-      "\"slider\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bind\",\"display\",\"min\",\"max\",\"bg_color\",\"fg_color\"]}"
+      "\"slider\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"label\",\"bind\",\"display\",\"min\",\"max\",\"bg_color\",\"fg_color\"]},"
+      "\"stream\":{\"fields\":[\"x\",\"y\",\"w\",\"h\",\"host\",\"port\",\"touch\",\"touch_port\",\"bg_color\",\"fg_color\"]}"
     "}";
 
 static esp_err_t screen_post(httpd_req_t* req) {
@@ -805,6 +808,77 @@ esp_err_t hello_get(httpd_req_t* req) {
   return ESP_OK;
 }
 
+// GET /stream_soak?start=1[&host=X][&port=5004] — start the stream link soak
+// GET /stream_soak?stop=1                        — stop it
+// GET /stream_soak                               — stats only
+//
+// Link-soak diagnostic: runs the stream widget's real ACK-paced transport
+// and hardware JPEG decode with the frames discarded, so the hosted link
+// can be qualified under this inbound load (esp-hosted-mcu#184) without a
+// layout or a capture pipeline. Host defaults to the SK server. The stats
+// path also reports on a widget-owned stream; start/stop only ever touch
+// a diagnostic one.
+esp_err_t stream_soak_get(httpd_req_t* req) {
+  bool ok = true;
+  const char* err = nullptr;
+
+  char q[160];
+  if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+    char val[80];
+    if (httpd_query_key_value(q, "stop", val, sizeof(val)) == ESP_OK) {
+      // Never yank a widget-owned client: the widget's own teardown must
+      // drop its pixel references first or LVGL keeps a freed buffer.
+      if (!stream_client_stop_diagnostic()) {
+        ok = false;
+        err = "stream is owned by the layout's widget";
+      }
+    } else if (httpd_query_key_value(q, "start", val, sizeof(val)) == ESP_OK) {
+      std::string host = sk_server().host;
+      uint16_t soak_port = 5004;
+      if (httpd_query_key_value(q, "host", val, sizeof(val)) == ESP_OK) host = val;
+      if (httpd_query_key_value(q, "port", val, sizeof(val)) == ESP_OK) {
+        soak_port = (uint16_t)atoi(val);
+      }
+      if (host.empty()) {
+        ok = false;
+        err = "no host: pass ?host= or wait for SK discovery";
+      } else if (!stream_client_start(host.c_str(), soak_port,
+                                      (uint32_t)LV_HOR_RES, (uint32_t)LV_VER_RES,
+                                      nullptr)) {
+        ok = false;
+        err = "start failed (already running?)";
+      }
+    }
+  }
+
+  const StreamStats s = stream_client_stats();
+  const int64_t age_ms =
+      s.last_frame_us > 0 ? (esp_timer_get_time() - s.last_frame_us) / 1000 : -1;
+  char body[512];
+  const int n = snprintf(
+      body, sizeof(body),
+      "{\"ok\":%s,\"err\":%s%s%s,\"running\":%s,\"connected\":%s,"
+      "\"frames_received\":%u,\"frames_decoded\":%u,\"decode_errors\":%u,"
+      "\"protocol_errors\":%u,\"reconnects\":%u,\"bytes_received\":%llu,"
+      "\"last_frame_age_ms\":%lld,\"interval_ms\":{\"samples\":%u,\"p50\":%u,"
+      "\"p99\":%u,\"max\":%u},\"internal_free\":%u,\"internal_largest\":%u}",
+      ok ? "true" : "false", err ? "\"" : "", err ? err : "null", err ? "\"" : "",
+      s.running ? "true" : "false", s.connected ? "true" : "false",
+      (unsigned)s.frames_received, (unsigned)s.frames_decoded,
+      (unsigned)s.decode_errors, (unsigned)s.protocol_errors,
+      (unsigned)s.reconnects, (unsigned long long)s.bytes_received,
+      (long long)age_ms, (unsigned)s.interval_samples, (unsigned)s.interval_p50_ms,
+      (unsigned)s.interval_p99_ms, (unsigned)s.interval_max_ms,
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                 MALLOC_CAP_8BIT));
+  if (!ok) httpd_resp_set_status(req, "400 Bad Request");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_send(req, body, n);
+  return ESP_OK;
+}
+
 }  // namespace
 
 void http_api_start(uint16_t port) {
@@ -896,6 +970,14 @@ void http_api_start(uint16_t port) {
       .user_ctx = nullptr,
   };
   httpd_register_uri_handler(server, &mic_gain_uri);
+
+  httpd_uri_t stream_soak_uri = {
+      .uri = "/stream_soak",
+      .method = HTTP_GET,
+      .handler = stream_soak_get,
+      .user_ctx = nullptr,
+  };
+  httpd_register_uri_handler(server, &stream_soak_uri);
 
   ESP_LOGI(
       TAG,

@@ -165,7 +165,13 @@ uint32_t make_timer(uint32_t ms, std::function<void()> fn, bool once) {
   auto* ctx = new TimerCtx{std::move(fn), 0, once};
   uint32_t h = 0;
   auto create = [&] {
-    ctx->handle = s_next_handle++;
+    // 0 is the callers' "no timer" sentinel, and after a counter wrap a
+    // recycled handle could still be live in the map — take the next free
+    // nonzero one so cancel() can never target the wrong timer.
+    do {
+      if (s_next_handle == 0) s_next_handle = 1;
+      ctx->handle = s_next_handle++;
+    } while (s_timers.count(ctx->handle) != 0);
     lv_timer_t* t = lv_timer_create(timer_cb, ms ? ms : 1, ctx);
     if (once) lv_timer_set_repeat_count(t, 1);
     s_timers[ctx->handle] = t;
