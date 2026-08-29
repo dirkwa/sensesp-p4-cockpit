@@ -21,4 +21,10 @@ struct BuildCtx {
 // previous screen).
 lv_obj_t* build_widget(BuildCtx& ctx, JsonObjectConst spec, std::string* err);
 
+// Tell any "stream" widgets that are direct children of `container` whether
+// their screen is visible. Streaming runs ONLY while visible; the layout
+// manager calls this from the screen switcher and after a layout swap.
+// UI thread only.
+void stream_widgets_notify_visibility(lv_obj_t* container, bool visible);
+
 }  // namespace jlp

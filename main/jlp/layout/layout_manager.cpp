@@ -60,6 +60,11 @@ static void switcher_show(ScreenSwitcherCtx* ctx, int idx) {
     }
   }
   ctx->active = idx;
+  // Stream widgets open/close their network stream with screen visibility —
+  // a hidden screen must not keep pulling frames through the hosted link.
+  for (size_t i = 0; i < ctx->screens.size(); i++) {
+    stream_widgets_notify_visibility(ctx->screens[i], (int)i == idx);
+  }
 }
 
 // Builds the screen(s) under `root`. Single screen: widgets parented
@@ -393,6 +398,15 @@ ApplyResult LayoutManager::apply(const std::string& json, ApplySource src) {
   lv_obj_clear_flag(staging, LV_OBJ_FLAG_HIDDEN);
   current_root_ = staging;
   if (old_root) lv_obj_delete(old_root);
+
+  // Single-screen layouts have no switcher, so nothing else ever marks
+  // their widgets visible. Multi-screen roots got switcher_show(0) during
+  // the staging build — a stream widget's start then races the old
+  // layout's teardown and retries on its watch timer, so no extra call is
+  // needed there.
+  if (screens.size() == 1) {
+    stream_widgets_notify_visibility(current_root_, true);
+  }
 
   // Persist only after a successful swap, and only for pushed layouts
   // (boot paths re-read the same persisted blob).
