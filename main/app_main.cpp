@@ -25,9 +25,9 @@
 #include "lvgl.h"
 
 #include "cockpit_hal/waveshare_audio.h"
-#include "cockpit_n2k/candump_tcp_server.h"
-#include "cockpit_n2k/twai_receiver.h"
-#include "cockpit_n2k/twai_transmitter.h"
+#include "espos_n2k/candump_tcp_server.h"
+#include "espos_n2k/twai_receiver.h"
+#include "espos_n2k/twai_transmitter.h"
 #include "cockpit_hal/ui.h"
 #include "cockpit_hal/waveshare_7b.h"
 #include "espos_voice/wyoming_satellite.h"
@@ -71,8 +71,8 @@ namespace {
 // layout fetch and zone seed fire once, on the first connect.
 bool s_boot_fetch_done = false;
 bool s_last_connected = false;
-cockpit_n2k::TwaiReceiver* s_n2k_rx = nullptr;
-cockpit_n2k::CandumpTcpServer* s_n2k_server = nullptr;
+espos_n2k::TwaiReceiver* s_n2k_rx = nullptr;
+espos_n2k::CandumpTcpServer* s_n2k_server = nullptr;
 // Set once the satellite exists, so poll_sk_state() can hand it to wake
 // discovery on the first SignalK connect.
 espos_voice::WyomingSatellite* s_wyoming_sat = nullptr;
@@ -376,9 +376,12 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(espos_ota_start());
 
   // ---- NMEA 2000 gateway: TWAI rx/tx + candump TCP server (:2599)
-  static cockpit_n2k::TwaiReceiver n2k_rx(cockpit_n2k::TwaiReceiverConfig::waveshare_touch_lcd_7b());
-  static cockpit_n2k::TwaiTransmitter n2k_tx;
-  static cockpit_n2k::CandumpTcpServer n2k_server(&n2k_rx, &n2k_tx);
+  // Pins live here, not in espos_n2k: the 7B's on-board TJA1051T CAN
+  // transceiver is wired to GPIO22/21, which is a fact about this board.
+  static espos_n2k::TwaiReceiver n2k_rx(
+      {.tx_pin = GPIO_NUM_22, .rx_pin = GPIO_NUM_21});
+  static espos_n2k::TwaiTransmitter n2k_tx;
+  static espos_n2k::CandumpTcpServer n2k_server(&n2k_rx, &n2k_tx);
   s_n2k_rx = &n2k_rx;
   s_n2k_server = &n2k_server;
   n2k_rx.start();
