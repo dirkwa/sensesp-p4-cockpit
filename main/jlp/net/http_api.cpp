@@ -826,23 +826,35 @@ esp_err_t stream_soak_get(httpd_req_t* req) {
   if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
     char val[80];
     if (httpd_query_key_value(q, "stop", val, sizeof(val)) == ESP_OK) {
-      // Never yank a widget-owned client: the widget's own teardown must
-      // drop its pixel references first or LVGL keeps a freed buffer.
-      if (!stream_client_stop_diagnostic()) {
+      if (strcmp(val, "1") != 0) {
+        ok = false;
+        err = "stop must be 1";
+      } else if (!stream_client_stop_diagnostic()) {
+        // Never yank a widget-owned client: the widget's own teardown must
+        // drop its pixel references first or LVGL keeps a freed buffer.
         ok = false;
         err = "stream is owned by the layout's widget";
       }
     } else if (httpd_query_key_value(q, "start", val, sizeof(val)) == ESP_OK) {
       std::string host = sk_server().host;
-      uint16_t soak_port = 5004;
+      long soak_port = 5004;
+      bool bad = strcmp(val, "1") != 0;
+      if (bad) err = "start must be 1";
       if (httpd_query_key_value(q, "host", val, sizeof(val)) == ESP_OK) host = val;
-      if (httpd_query_key_value(q, "port", val, sizeof(val)) == ESP_OK) {
-        soak_port = (uint16_t)atoi(val);
+      if (!bad && httpd_query_key_value(q, "port", val, sizeof(val)) == ESP_OK) {
+        char* end = nullptr;
+        soak_port = strtol(val, &end, 10);
+        if (!end || *end != '\0' || soak_port < 1 || soak_port > 65535) {
+          bad = true;
+          err = "port must be 1..65535";
+        }
       }
-      if (host.empty()) {
+      if (bad) {
+        ok = false;
+      } else if (host.empty()) {
         ok = false;
         err = "no host: pass ?host= or wait for SK discovery";
-      } else if (!stream_client_start(host.c_str(), soak_port,
+      } else if (!stream_client_start(host.c_str(), (uint16_t)soak_port,
                                       (uint32_t)LV_HOR_RES, (uint32_t)LV_VER_RES,
                                       nullptr)) {
         ok = false;

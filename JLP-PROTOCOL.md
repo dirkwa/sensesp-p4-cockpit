@@ -328,6 +328,7 @@ Displayed value = `(raw × scale) + offset`, formatted to `decimals`, then `unit
 - While the operator is dragging, the knob follows the touch and ignores subject updates so an in-flight SK echo can't fight the gesture. Releasing (or a press lost off the widget) computes the raw value from the knob position (inverse of the display transform) and PUTs it once, then the widget resumes following the subject — which silently corrects the knob if the PUT is ever rejected. No separate reconcile timer.
 
 #### `stream`
+
 - Remote view: shows a live MJPEG stream rendered on the SignalK box (the
   `signalk-esp32-stream` plugin captures a webapp — Freeboard-SK, KIP,
   Grafana — with Xvfb + Chromium + ffmpeg) and forwards touches back, so the

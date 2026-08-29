@@ -101,6 +101,10 @@ int connect_to_server(State& st) {
 
   struct timeval tv = {.tv_sec = kRecvTimeoutS, .tv_usec = 0};
   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  // The ACK send must be bounded too: stop() is flag-only, so a peer that
+  // stops reading (hung server, half-open link) would otherwise pin the
+  // task in send() forever and the singleton could never restart.
+  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
   err = connect(sock, result->ai_addr, result->ai_addrlen);
   if (err == 0 && result->ai_family == AF_INET) {
@@ -327,6 +331,9 @@ bool stream_client_start(const char* host, uint16_t port, uint32_t width,
     free_state(st);
     return false;
   }
+  // Both buffers get the same value passed to jpeg_decoder_process, so the
+  // decode limit must be the SMALLER of the two allocations.
+  st->out_buf_size = std::min(st->out_buf_size, out1_size);
 
   taskENTER_CRITICAL(&g_mux);
   busy = g_state != nullptr;

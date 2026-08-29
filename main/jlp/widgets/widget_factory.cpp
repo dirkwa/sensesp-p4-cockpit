@@ -2730,6 +2730,11 @@ void stream_do_stop(StreamCtx* c) {
 
 void stream_watch_tick(StreamCtx* c) {
   if (!c->visible) return;
+  // Self-heal ownership: if anything stopped the singleton out from under
+  // us (a teardown-ordering surprise, a future caller), re-derive `started`
+  // from the client's real state so the retry below can run instead of the
+  // widget staying dark while believing it still owns a session.
+  if (c->started && !stream_client_stats().running) c->started = false;
   if (!c->started) stream_try_start(c);
   const StreamStats s = stream_client_stats();
   lv_obj_t* ph = c->sh->placeholder;
