@@ -109,19 +109,28 @@ void AlertOverlay::init() {
       ack_button_,
       [](lv_event_t*) {
         AlertOverlay& self = alert_overlay();
-        if (!self.current_path_.empty()) {
-          // acknowledge() fires on_change(), which rebuilds the overlay
-          // and moves current_path_ on — take a copy first so the SK ACK
-          // names the alarm the operator actually tapped.
-          const std::string path = self.current_path_;
-          // Local ack: suppress this path in the registry so the
-          // overlay dismisses NOW and the device stays usable, even
-          // though the N2K bus keeps re-asserting the alarm. Re-arms
-          // when the condition clears or escalates (see the registry).
-          notifications().acknowledge(path);
-          // Best-effort: also tell SK we acknowledged. Harmless for
-          // bus-sourced alarms (they re-assert), and lets
-          // server-mediated/UI notifications clear properly.
+        if (self.current_path_.empty()) return;
+        // Pop-under-finger guard: alarms pop over the lower half of the
+        // screen — exactly where a stream/chart tab is being touched. A
+        // tap that lands right after the overlay appeared (or switched
+        // to the next alarm) was almost certainly aimed at the widget
+        // underneath, not at ACK; with a dozen bus alarms rotating, that
+        // turns into accidental ack whack-a-mole. Ignore it.
+        if (lv_tick_elaps(self.shown_at_) < 500) return;
+        // acknowledge() fires on_change(), which rebuilds the overlay
+        // and moves current_path_ on — take a copy first so the SK ACK
+        // names the alarm the operator actually tapped.
+        const std::string path = self.current_path_;
+        // Local ack: suppress this path in the registry so the
+        // overlay dismisses NOW and the device stays usable, even
+        // though the N2K bus keeps re-asserting the alarm. Re-arms
+        // when the condition clears or escalates (see the registry).
+        //
+        // The server ack is sent only while the path hasn't proven to
+        // re-assert: for a bus-backed alarm our state=normal delta just
+        // triggers a clear -> re-raise flap network-wide (see
+        // NotificationsRegistry::acknowledge).
+        if (notifications().acknowledge(path)) {
           put_notification_ack(path);
         }
       },
@@ -139,8 +148,13 @@ void AlertOverlay::init() {
     // quieter alert. A visual-only or server-silenced alert shows on the
     // overlay but stays quiet. Still gate on min_state via most_severe so
     // a below-threshold escalation doesn't beep.
+    // ... and never for an escalation on an already-acked path: a
+    // bus-backed alarm flaps back to its acked severity after every
+    // ack-clear echo, and re-beeping an alarm the operator just
+    // silenced is the one thing an ack must reliably prevent.
     if (enabled_ && notifications().last_change_was_escalation() &&
-        notifications().last_escalation_wants_sound()) {
+        notifications().last_escalation_wants_sound() &&
+        !notifications().is_acknowledged(notifications().last_changed_path())) {
       const Notification* n = notifications().most_severe();
       if (n && n->state >= min_state_) chime().play(n->state);
     }
@@ -169,6 +183,12 @@ void AlertOverlay::rebuild() {
     lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
     current_path_.clear();
     return;
+  }
+  // Arm the pop-under-finger guard whenever the overlay appears or moves
+  // on to a different alarm — that's the moment a tap meant for the
+  // widget underneath could land on ACK instead.
+  if (lv_obj_has_flag(root_, LV_OBJ_FLAG_HIDDEN) || current_path_ != n->path) {
+    shown_at_ = lv_tick_get();
   }
   current_path_ = n->path;
   lv_label_set_text(state_label_, not_state_name(n->state));

@@ -34,6 +34,9 @@ class AlertOverlay {
   lv_obj_t* msg_label_ = nullptr;
   lv_obj_t* ack_button_ = nullptr;
   std::string current_path_;       // path-after-prefix shown right now
+  // lv_tick when the overlay appeared or switched alarms; taps inside
+  // the guard window after that are ignored (pop-under-finger).
+  uint32_t shown_at_ = 0;
 
   bool enabled_ = true;
   NotState min_state_ = NotState::Alarm;
