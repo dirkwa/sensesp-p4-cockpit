@@ -289,6 +289,15 @@ extern "C" void app_main(void) {
   }
   wy_cfg.wake_input_gain = 6;   // mic quiet (~665 raw); x6 into WakeNet range
   wy_cfg.wake_threshold = 0.45f;
+  // Per-chunk RMS normalisation is an AGC: it scales quiet ambient toward
+  // the same target as speech (cap permitting), compressing exactly the
+  // speech-vs-silence contrast the orchestrator's energy gate endpoints
+  // on. Measured at the gate on this boat: ambient ~900, speech ~1400 —
+  // 1.5:1, ungateable, every utterance ran to the cap. A fixed gain keeps
+  // the mic's real ~4:1 ratio intact and lets the gate's adaptive floor do
+  // its job.
+  wy_cfg.mic_stream_target_rms = 0;
+  wy_cfg.mic_stream_gain = 8;
   // The STT stream is normalised toward a target RMS (see wyoming_satellite.h):
   // the orchestrator's speech floor is hardcoded at 700 for a far louder mic,
   // and this panel measures ~19 RMS raw, so no fixed multiplier works across
@@ -296,7 +305,11 @@ extern "C" void app_main(void) {
   // mic_stream_target_rms is 0.
   // No awake blip: mic and speaker share one I2S bus inches apart, and the
   // orchestrator's endpointer would seed its noise floor from the tone.
-  wy_cfg.awake_cue = false;
+  // Cue ON: without it the talker has no idea when the mic opens, waits a
+  // polite beat, and the endpointer closes the utterance on 3 s of silence
+  // before the question begins. The old floor-pollution reason is gone —
+  // the orchestrator mutes the mic for the cue + 0.5 s before endpointing.
+  wy_cfg.awake_cue = true;
   static espos_voice::WyomingSatellite wyoming_sat(&audio, wy_cfg);
   s_wyoming_sat = &wyoming_sat;
   wyoming_sat.set_mic_muted_fn([] { return jlp::voice().mic_muted(); });
