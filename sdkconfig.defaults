@@ -133,36 +133,28 @@ CONFIG_LCD_DSI_ISR_CACHE_SAFE=y
 # could tip it.
 #
 # IDF's default sends every malloc() under 16 KB to internal RAM first. Lower
-# it so ordinary allocations prefer PSRAM; anything that genuinely needs
-# internal memory asks for it with MALLOC_CAP_INTERNAL and is unaffected, and
-# the allocator still falls back to internal when PSRAM is full (see
-# Kconfig.spiram.common: "If allocation from the preferred region fails, an
-# attempt is made to allocate from the non-preferred region instead").
-#
-# 1024, down from an earlier 4096: the notification-delta path allocates
-# 1-4 KB JsonDocuments and string copies on every SK delta, and under an
-# N2K alarm storm plus stream-widget reconnect churn that traffic dragged
-# the DMA-capable internal pool from ~31 KB to 13 KB — at which point
-# esp-hosted could no longer allocate TX buffers, outbound ACKs vanished
-# while big inbound frames still arrived, and the radio link eventually
-# wedged hard enough for the co-processor heartbeat watchdog to reboot
-# the panel. Mid-size churn belongs in PSRAM.
+# it so ordinary allocations — including the 1-4 KB JsonDocument/string churn
+# of every SK delta — prefer PSRAM and leave internal RAM to the DMA users
+# (hosted transport, I2S, DSI). Anything that genuinely needs internal memory
+# asks for it with MALLOC_CAP_INTERNAL and is unaffected, and the allocator
+# still falls back to internal when PSRAM is full (Kconfig.spiram.common).
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
 
-# Enlarge the internal reserve (default 32 KB) that plain malloc() may NOT
-# consume: only MALLOC_CAP_INTERNAL/DMA requests (esp-hosted transport
-# buffers, I2S/DSI DMA, task stacks) can dip into it. This is the floor
-# under dma_int — ordinary allocation pressure now spills to PSRAM 64 KB
-# earlier instead of starving the radio's DMA pool.
+# Enlarge the internal reserve (default 32 KB) that is prioritized for
+# MALLOC_CAP_INTERNAL/DMA requests (hosted transport buffers, I2S/DSI DMA,
+# task stacks): ordinary allocation pressure spills to PSRAM 64 KB earlier
+# instead of starving the radio's DMA pool. Plain malloc() can still reach
+# the reserve as a last resort once everything else is exhausted — this is
+# a priority tier, not a hard floor.
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 
-# The hosted transport's own mempool is the remaining internal-DMA hog: under
-# sustained inbound MJPEG (the stream widget, ~270 KB/s) its RX buffering
-# drove internal free to ~12 KB, at which point the SDIO link to the C6
-# wedged mid-stream and the co-processor heartbeat watchdog rebooted the
-# panel. The P4's GDMA reaches PSRAM through cache; the option's help names
-# sustained video streaming as exactly the workload it exists for.
-# (Hosted-transport setting — upstream the guidance to espos/docs/wifi.md.)
+# Keep the hosted transport mempool — the largest internal-DMA consumer —
+# in PSRAM, or sustained inbound TCP (the stream widget) exhausts internal
+# RAM until the SDIO link to the C6 wedges. Only valid with 64-byte L2
+# cache lines (CONFIG_CACHE_L2_CACHE_LINE_64B, this board's setting): the
+# 1600-byte transport stride is not 128-aligned, and 128-byte lines make
+# the SDIO driver reject PSRAM buffers (esp-hosted-mcu#219). Guidance and
+# measurements: espos/docs/wifi.md (espOS #33).
 CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
 
 CONFIG_WIFI_RMT_RX_BA_WIN=6
