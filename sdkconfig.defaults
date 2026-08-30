@@ -133,11 +133,31 @@ CONFIG_LCD_DSI_ISR_CACHE_SAFE=y
 # could tip it.
 #
 # IDF's default sends every malloc() under 16 KB to internal RAM first. Lower
-# it so ordinary allocations prefer PSRAM; anything that genuinely needs
-# internal memory asks for it with MALLOC_CAP_INTERNAL and is unaffected, and
-# the allocator still falls back to internal when PSRAM is full (see
-# Kconfig.spiram.common: "If allocation from the preferred region fails, an
-# attempt is made to allocate from the non-preferred region instead").
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+# it so ordinary allocations — including the 1-4 KB JsonDocument/string churn
+# of every SK delta — prefer PSRAM and leave internal RAM to the DMA users
+# (hosted transport, I2S, DSI). Anything that genuinely needs internal memory
+# asks for it with MALLOC_CAP_INTERNAL and is unaffected, and the allocator
+# still falls back to internal when PSRAM is full (Kconfig.spiram.common).
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
+
+# Enlarge the internal reserve (default 32 KB) that is prioritized for
+# MALLOC_CAP_INTERNAL/DMA requests (hosted transport buffers, I2S/DSI DMA,
+# task stacks): ordinary allocation pressure spills to PSRAM 64 KB earlier
+# instead of starving the radio's DMA pool. Plain malloc() can still reach
+# the reserve as a last resort once everything else is exhausted — this is
+# a priority tier, not a hard floor.
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+
+# Keep the hosted transport mempool — the transport's large DMA buffer
+# pool — in PSRAM: left internal, sustained inbound TCP (the stream
+# widget) exhausts internal RAM until the SDIO link to the C6 wedges. Only valid with 64-byte L2
+# cache lines: the 1600-byte transport stride is not 128-aligned, and
+# 128-byte lines make the SDIO driver reject PSRAM buffers
+# (esp-hosted-mcu#219). The line size is pinned so the prerequisite is
+# enforced, not just documented — raising the L2 cache size (256 KB forces
+# 128-byte lines) would otherwise flip it silently and wedge the
+# transport. Guidance and measurements: espos/docs/wifi.md (espOS #33).
+CONFIG_CACHE_L2_CACHE_LINE_64B=y
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
 
 CONFIG_WIFI_RMT_RX_BA_WIN=6

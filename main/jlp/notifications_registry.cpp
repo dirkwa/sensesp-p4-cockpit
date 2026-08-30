@@ -4,12 +4,21 @@
 #include <string_view>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "cockpit_hal/ui.h"
 #include "espos_sk.h"
 
 static const char* TAG = "jlp.notifs";
 
 namespace jlp {
+
+namespace {
+// How long after our own ack-clear echo a re-raise still counts as "the
+// source never stopped asserting". Bus alarms come back in ~1 s; a whole
+// minute of margin still can't confuse a condition that genuinely cleared
+// and later re-occurred with one that never went away.
+constexpr int64_t kReassertWindowUs = 60LL * 1000 * 1000;
+}  // namespace
 
 void NotificationsRegistry::apply(const std::string& path_after_prefix,
                                   const JsonVariantConst& value) {
@@ -31,6 +40,7 @@ void NotificationsRegistry::apply(const std::string& path_after_prefix,
     }
     if (map_.erase(path_after_prefix) > 0) {
       ESP_LOGI(TAG, "cleared %s", path_after_prefix.c_str());
+      last_changed_path_ = path_after_prefix;
       fire_observers();
     }
     return;
@@ -56,6 +66,11 @@ void NotificationsRegistry::apply(const std::string& path_after_prefix,
     // cleared -> re-arm, unless we caused this clear ourselves.
     if (self_cleared_.erase(path_after_prefix) == 0) {
       acked_.erase(path_after_prefix);
+    } else {
+      // Our own ack-clear echo. Start the re-assert clock: if the same
+      // path alarms again inside the window, the source never stopped
+      // asserting and future acks for it should stay local-only.
+      ack_clear_echo_at_[path_after_prefix] = esp_timer_get_time();
     }
     auto it = map_.find(path_after_prefix);
     if (it != map_.end() && it->second.state == n.state &&
@@ -65,6 +80,7 @@ void NotificationsRegistry::apply(const std::string& path_after_prefix,
     map_[path_after_prefix] = n;
     ESP_LOGI(TAG, "cleared %s (state=%s)", path_after_prefix.c_str(),
              not_state_name(n.state));
+    last_changed_path_ = path_after_prefix;
     fire_observers();
     return;
   }
@@ -75,6 +91,21 @@ void NotificationsRegistry::apply(const std::string& path_after_prefix,
   // that means the condition really went away — leaving the ack stuck
   // on forever.
   self_cleared_.erase(path_after_prefix);
+
+  // Re-raised shortly after our ack-clear echo: the source is bus-backed
+  // and never stopped asserting. Remember that so acknowledge() stops
+  // feeding the server clear -> re-raise flap for this path.
+  auto echo_it = ack_clear_echo_at_.find(path_after_prefix);
+  if (echo_it != ack_clear_echo_at_.end()) {
+    if (esp_timer_get_time() - echo_it->second < kReassertWindowUs &&
+        n.state >= NotState::Alert) {
+      if (reasserting_.insert(path_after_prefix).second) {
+        ESP_LOGI(TAG, "%s re-asserts after ack — future acks stay local",
+                 path_after_prefix.c_str());
+      }
+    }
+    ack_clear_echo_at_.erase(echo_it);
+  }
 
   // If a previously-acked notification escalates above the level it
   // was acknowledged at, re-arm it so the overlay pops again.
@@ -108,6 +139,7 @@ void NotificationsRegistry::apply(const std::string& path_after_prefix,
   ESP_LOGI(TAG, "%s = %s \"%s\"%s", path_after_prefix.c_str(),
            not_state_name(n.state), n.message.c_str(),
            last_change_was_escalation_ ? " (escalation)" : "");
+  last_changed_path_ = path_after_prefix;
   fire_observers();
 }
 
@@ -147,19 +179,25 @@ std::vector<Notification> NotificationsRegistry::snapshot(
   return out;
 }
 
-void NotificationsRegistry::acknowledge(const std::string& path_after_prefix) {
+bool NotificationsRegistry::acknowledge(const std::string& path_after_prefix) {
   auto it = map_.find(path_after_prefix);
   if (it == map_.end()) {
     // Nothing tracked under this path; nothing to ack.
-    return;
+    return false;
   }
   acked_[path_after_prefix] = it->second.state;
-  // The ACK delta we are about to send comes back as a clear; don't let
-  // it re-arm the ack we just made (see self_cleared_).
-  self_cleared_.insert(path_after_prefix);
-  ESP_LOGI(TAG, "acked %s (state=%s)", path_after_prefix.c_str(),
-           not_state_name(it->second.state));
+  const bool send_server_ack = reasserting_.count(path_after_prefix) == 0;
+  if (send_server_ack) {
+    // The ACK delta the caller is about to send comes back as a clear;
+    // don't let it re-arm the ack we just made (see self_cleared_).
+    self_cleared_.insert(path_after_prefix);
+  }
+  ESP_LOGI(TAG, "acked %s (state=%s%s)", path_after_prefix.c_str(),
+           not_state_name(it->second.state),
+           send_server_ack ? "" : ", local-only");
+  last_changed_path_ = path_after_prefix;
   fire_observers();
+  return send_server_ack;
 }
 
 bool NotificationsRegistry::is_acknowledged(

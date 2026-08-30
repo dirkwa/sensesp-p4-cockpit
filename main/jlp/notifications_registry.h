@@ -102,8 +102,16 @@ class NotificationsRegistry {
    *
    *  The ack auto-clears (the notification re-arms) when the path
    *  goes to normal/nominal, OR when its state escalates above the
-   *  level it was acked at (e.g. alarm -> emergency re-pops). */
-  void acknowledge(const std::string& path_after_prefix);
+   *  level it was acked at (e.g. alarm -> emergency re-pops).
+   *
+   *  Returns whether the caller should ALSO send the SK ack delta.
+   *  False for a path known to re-assert (a bus-backed alarm): our
+   *  state=normal delta only clears the server copy for the ~1 s it
+   *  takes the source to re-raise it, and that clear->re-raise flap —
+   *  multiplied by every consumer on the network — is pure churn. A
+   *  local-only ack leaves the server truthfully alarming and just
+   *  silences this panel. */
+  [[nodiscard]] bool acknowledge(const std::string& path_after_prefix);
 
   /** True if `path` is currently acknowledged. */
   bool is_acknowledged(const std::string& path_after_prefix) const;
@@ -133,6 +141,13 @@ class NotificationsRegistry {
   bool last_escalation_wants_sound() const {
     return last_escalation_wants_sound_;
   }
+
+  /** Path (after "notifications.") of the change that fired the current
+   *  on_change() callbacks. The chime gate pairs it with
+   *  is_acknowledged() so an already-acked alarm flapping back to its
+   *  acked severity never re-beeps. Only meaningful inside an
+   *  on_change() callback. */
+  const std::string& last_changed_path() const { return last_changed_path_; }
 
   /** Register a change observer. Returns an opaque token; the caller
    *  must call `off_change(token)` before any captured pointer is
@@ -176,6 +191,16 @@ class NotificationsRegistry {
   // Used to suppress the overlay while the bus keeps re-asserting,
   // and to re-arm if the condition later escalates.
   std::unordered_map<std::string, NotState> acked_;
+
+  // Paths whose ack-clear echo was followed by a re-raise (the source
+  // keeps asserting the alarm). Once a path proves that, acknowledge()
+  // stops sending the server ack delta for it — see acknowledge().
+  // Process-lifetime: a reboot forgets, and the first ack after boot
+  // re-learns from one clear->re-raise round trip.
+  std::unordered_set<std::string> reasserting_;
+  // Path -> esp_timer time (us) when our own ack-clear echo arrived.
+  // A re-raise within the window promotes the path into reasserting_.
+  std::unordered_map<std::string, int64_t> ack_clear_echo_at_;
   std::vector<Slot> observers_;
   ObserverToken next_token_ = 1;
   // Set by apply() right before each fire_observers() call so that
@@ -184,6 +209,7 @@ class NotificationsRegistry {
   // apply() invocation.
   bool last_change_was_escalation_ = false;
   bool last_escalation_wants_sound_ = false;
+  std::string last_changed_path_;
 };
 
 NotificationsRegistry& notifications();
