@@ -151,10 +151,13 @@ CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 # Keep the hosted transport mempool — the largest internal-DMA consumer —
 # in PSRAM, or sustained inbound TCP (the stream widget) exhausts internal
 # RAM until the SDIO link to the C6 wedges. Only valid with 64-byte L2
-# cache lines (CONFIG_CACHE_L2_CACHE_LINE_64B, this board's setting): the
-# 1600-byte transport stride is not 128-aligned, and 128-byte lines make
-# the SDIO driver reject PSRAM buffers (esp-hosted-mcu#219). Guidance and
-# measurements: espos/docs/wifi.md (espOS #33).
+# cache lines: the 1600-byte transport stride is not 128-aligned, and
+# 128-byte lines make the SDIO driver reject PSRAM buffers
+# (esp-hosted-mcu#219). The line size is pinned so the prerequisite is
+# enforced, not just documented — raising the L2 cache size (256 KB forces
+# 128-byte lines) would otherwise flip it silently and wedge the
+# transport. Guidance and measurements: espos/docs/wifi.md (espOS #33).
+CONFIG_CACHE_L2_CACHE_LINE_64B=y
 CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
 
 CONFIG_WIFI_RMT_RX_BA_WIN=6
