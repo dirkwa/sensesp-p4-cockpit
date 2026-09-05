@@ -62,6 +62,11 @@ bool stream_client_start(const char* host, uint16_t port, uint32_t width,
 // the brief wind-down returns false — retry on a timer.
 void stream_client_stop();
 
+// Withhold/resume the per-frame ACK. While paused the server sends no new
+// frames (ACK-gated), freeing the shared radio for the voice mic uplink;
+// the last frame stays on screen. Safe from the UI task (flag only).
+void stream_client_set_paused(bool paused);
+
 // Stops only a diagnostic client — one started with a null frame callback
 // (the /stream_soak harness). Returns false without stopping anything when
 // the running client belongs to a stream widget: the widget's teardown

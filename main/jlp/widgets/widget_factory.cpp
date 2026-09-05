@@ -2736,12 +2736,20 @@ void stream_watch_tick(StreamCtx* c) {
   // widget staying dark while believing it still owns a session.
   if (c->started && !stream_client_stats().running) c->started = false;
   if (!c->started) stream_try_start(c);
+  // Yield the radio to the voice mic uplink while the satellite is
+  // listening or speaking: a full-rate stream downlink otherwise starves
+  // the uplink and the question reaches the orchestrator as silence. The
+  // picture freezes on its last frame for the utterance, then resumes.
+  const int vstate = voice().state_code();  // 2 listening, 3 speaking
+  const bool voice_busy = vstate == 2 || vstate == 3;
+  stream_client_set_paused(voice_busy);
   const StreamStats s = stream_client_stats();
   lv_obj_t* ph = c->sh->placeholder;
   if (!ph) return;
   const int64_t age_ms =
       s.last_frame_us > 0 ? (esp_timer_get_time() - s.last_frame_us) / 1000 : -1;
-  if (c->started && s.connected && age_ms >= 0 && age_ms < 3000) {
+  // A deliberate pause freezes frames — don't misreport it as "no signal".
+  if (voice_busy || (c->started && s.connected && age_ms >= 0 && age_ms < 3000)) {
     lv_obj_add_flag(ph, LV_OBJ_FLAG_HIDDEN);
   } else {
     lv_label_set_text(ph, (c->started && s.connected) ? "no signal" : "connecting…");
