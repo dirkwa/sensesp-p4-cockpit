@@ -142,6 +142,20 @@ void record_interval(State& st, uint32_t ms) {
   taskEXIT_CRITICAL(&st.ring_mux);
 }
 
+// Send the single-byte ACK for the current frame, first waiting out any
+// voice pause. Every ACK path goes through here — including the rejected
+// wrong-size frame — so a misconfigured capture can't keep releasing
+// frames and starving the voice uplink. Returns false if the connection
+// should end (stopped, or send failed).
+bool ack_frame(State& st, int sock) {
+  while (st.paused.load() && st.running.load()) {
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+  if (!st.running.load()) return false;
+  uint8_t ack = 1;
+  return send(sock, &ack, 1, 0) == 1;
+}
+
 void run_connection(State& st, int sock) {
   int64_t prev_frame_us = 0;
   bool wrong_size_warned = false;
@@ -183,9 +197,9 @@ void run_connection(State& st, int sock) {
       }
       // Still an ACK: the server cannot tell a rejected frame from a shown
       // one, and withholding it would stall the pacing loop on a
-      // misconfigured capture instead of surfacing the error counter.
-      uint8_t ack = 1;
-      if (send(sock, &ack, 1, 0) != 1) return;
+      // misconfigured capture instead of surfacing the error counter. Via
+      // ack_frame so a wrong-size flood also yields to voice.
+      if (!ack_frame(st, sock)) return;
       continue;
     }
 
@@ -230,18 +244,11 @@ void run_connection(State& st, int sock) {
                (unsigned)frame_len);
     }
 
-    // Hold the ACK while voice has the radio: with no ACK the server sends
-    // no further frame, so the mic uplink runs uncontended. The frame just
-    // decoded is already on screen; the picture simply freezes for the
-    // ~few seconds of an utterance. Poll rather than block on a notify so a
-    // stop/disconnect still tears down promptly.
-    while (st.paused.load() && st.running.load()) {
-      vTaskDelay(pdMS_TO_TICKS(50));
-    }
-    if (!st.running.load()) return;
-
-    uint8_t ack = 1;
-    if (send(sock, &ack, 1, 0) != 1) return;
+    // Hold the ACK while voice has the radio (ack_frame waits out the
+    // pause): no ACK means the server sends no further frame, so the mic
+    // uplink runs uncontended. The frame just decoded stays on screen; the
+    // picture freezes for the ~few seconds of an utterance, then resumes.
+    if (!ack_frame(st, sock)) return;
 
     uint32_t n = st.frames_decoded.load();
     if (n != 0 && (n & 0x3F) == 0) {
@@ -362,16 +369,11 @@ bool stream_client_start(const char* host, uint16_t port, uint32_t width,
   }
 
   // Core 0: the ui task owns core 1, and socket I/O + the blocking decode
-  // call must never compete with LVGL's render slice.
-  //
-  // Priority 2 — strictly BELOW the espos_voice tasks (priority 3). At 4
-  // this task preempted the wake/mic feeds almost continuously while a
-  // stream ran: wake word barely triggered on the stream tab and captures
-  // came back as empty transcripts. The stream is the one consumer built
-  // to be starved — ACK-paced, latest-frame-wins — so when voice needs
-  // the core, frames simply arrive later. Not 3: equal priority still
-  // round-robins whole ticks away from the mic's small deadline-bound
-  // chunks.
+  // call must never compete with LVGL's render slice. Priority 2 stays
+  // strictly below the espos_voice tasks (3) and wake tasks (5), so
+  // ACK-paced stream work always yields the core to voice work; equal
+  // priority would round-robin whole ticks away from the mic's small
+  // deadline-bound chunks.
   if (xTaskCreatePinnedToCore(stream_task, "jlp_stream", 8192, st, 2, nullptr, 0) !=
       pdPASS) {
     ESP_LOGE(TAG, "task create failed");

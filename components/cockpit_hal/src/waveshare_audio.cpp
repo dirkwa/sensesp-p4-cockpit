@@ -437,6 +437,17 @@ bool WaveshareAudio::apply_rate(uint32_t rate) {
   // through a pipe" tone. Reconfigure the channel clock explicitly: the API
   // requires the channel be disabled (READY) first, then re-enabled.
   esp_codec_dev_close(codec_);
+  // Close any OPEN capture codec-dev handle before touching the shared port
+  // clock. TX and RX are one full-duplex I2S port, and esp_codec_dev refuses
+  // a TX rate that differs from an *enabled* RX peer
+  // (audio_codec_data_i2s.c check_fs_compatible: the conflict fires only
+  // while paired->in_enable is true, which a bare i2s_channel_disable does
+  // NOT clear — only closing the codec-dev handle does). Left open, the
+  // 22050 TTS reclock is rejected while the mic runs at 16000, the reply
+  // plays through the wrong clock, and the user hears a beep then nothing.
+  // Reopened at the end so the wake engine keeps capturing.
+  const bool had_mono = suspend_capture_for_reclock();
+  const bool had_wake = suspend_capture2_for_reclock();
   i2s_channel_disable(tx_chan_);
   i2s_std_clk_config_t clk = I2S_STD_CLK_DEFAULT_CONFIG(rate);
   clk.mclk_multiple = (i2s_mclk_multiple_t)kMclkMultiple;
@@ -445,6 +456,7 @@ bool WaveshareAudio::apply_rate(uint32_t rate) {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "i2s reclock to %lu Hz failed: %s", (unsigned long)rate,
              esp_err_to_name(err));
+    resume_capture_after_reclock(had_mono, had_wake);
     return false;
   }
   fs_.sample_rate = rate;
@@ -458,15 +470,12 @@ bool WaveshareAudio::apply_rate(uint32_t rate) {
   }
   esp_codec_dev_set_out_vol(codec_, vol_pct_);
   open_rate_ = rate;
-  // TX and RX are full duplex on ONE I2S port sharing MCLK/BCLK/WS, so
-  // reclocking TX above disturbs the RX clock domain too (esp_codec_dev's own
-  // set_fs notes the converse: an RX clock change doesn't take effect without
-  // reconfiguring TX). With the dual-mic wake feed running, that left the RX
-  // disabled the moment a TTS answer played at a different rate than the mic's
-  // 16 kHz — the wake engine then read a dead channel and never recovered.
-  // Observed as wake firing once, answering, and going deaf ~25 s later (when
-  // the reply actually played), which looks like a bad wake re-arm but is not.
-  restore_rx_channel();
+  // Reopen any capture handle we closed above, at the mic's native rate.
+  // With TX now the only party choosing the port rate during playback, and
+  // capture reopened at 16000 afterward, the shared-clock conflict never
+  // arises. (Playback and the mic never truly run at once here — the wake
+  // gate holds capture off during Speaking — so the brief close is free.)
+  resume_capture_after_reclock(had_mono, had_wake);
   return true;
 }
 
@@ -644,6 +653,70 @@ void WaveshareAudio::stop_capture() {
     restore_rx_channel();
   }
   if (capture_mutex_) xSemaphoreGive(capture_mutex_);
+}
+
+// Close an open capture codec-dev handle before a TX reclock, WITHOUT
+// touching its refcount — the consuming task still "owns" it; we cycle the
+// hardware under it. esp_codec_dev's full-duplex arbitration
+// (check_fs_compatible) rejects a differing TX rate only while the RX peer's
+// in_enable is true, and only a codec-dev close clears that flag. Returns
+// whether it was open (so resume knows to reopen). Caller holds codec_mutex_
+// (playback path); we take the capture mutex to serialise against
+// record_pcm()/start/stop.
+bool WaveshareAudio::suspend_capture_for_reclock() {
+  if (!capture_mutex_) return false;
+  xSemaphoreTake(capture_mutex_, portMAX_DELAY);
+  bool was_open = capturing_;
+  if (was_open) {
+    for (int i = 0; i < 100 && reading_.load(); i++) vTaskDelay(pdMS_TO_TICKS(2));
+    esp_codec_dev_close(codec_in_);
+    capturing_ = false;  // reflects the real hardware state; refcount untouched
+  }
+  xSemaphoreGive(capture_mutex_);
+  return was_open;
+}
+
+bool WaveshareAudio::suspend_capture2_for_reclock() {
+  if (!capture2_mutex_) return false;
+  xSemaphoreTake(capture2_mutex_, portMAX_DELAY);
+  bool was_open = capturing2_;
+  if (was_open) {
+    for (int i = 0; i < 100 && reading2_.load(); i++) vTaskDelay(pdMS_TO_TICKS(2));
+    esp_codec_dev_close(codec_in2_);
+    capturing2_ = false;
+  }
+  xSemaphoreGive(capture2_mutex_);
+  return was_open;
+}
+
+// Reopen capture handles suspended for a reclock, at the mic's native rate.
+void WaveshareAudio::resume_capture_after_reclock(bool had_mono, bool had_wake) {
+  if (had_mono && capture_mutex_) {
+    xSemaphoreTake(capture_mutex_, portMAX_DELAY);
+    if (!capturing_ && capture_users_ > 0) {
+      if (esp_codec_dev_open(codec_in_, &fs_in_) == ESP_OK) {
+        esp_codec_dev_set_in_gain(codec_in_, mic_gain_db_);
+        capturing_ = true;
+      } else {
+        ESP_LOGW(TAG, "mic reopen after reclock failed");
+      }
+      restore_rx_channel();
+    }
+    xSemaphoreGive(capture_mutex_);
+  }
+  if (had_wake && capture2_mutex_) {
+    xSemaphoreTake(capture2_mutex_, portMAX_DELAY);
+    if (!capturing2_ && capture2_users_ > 0) {
+      if (esp_codec_dev_open(codec_in2_, &fs_in2_) == ESP_OK) {
+        esp_codec_dev_set_in_gain(codec_in2_, mic_gain_db_);
+        capturing2_ = true;
+      } else {
+        ESP_LOGW(TAG, "wake mic reopen after reclock failed");
+      }
+      restore_rx_channel();
+    }
+    xSemaphoreGive(capture2_mutex_);
+  }
 }
 
 // Re-enable the SHARED I2S RX around capture open/close.
