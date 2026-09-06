@@ -658,21 +658,33 @@ size_t WaveshareAudio::record_pcm(int16_t* out, size_t max_frames) {
   return frames;
 }
 
+// Wait for an in-flight read to leave record_pcm()/record_pcm2() before its
+// handle is closed. Caller must have already cleared the capturing_ flag so
+// no NEW read starts. Returns false if a read is still active at the deadline
+// (~200 ms; a chunk is ~32 ms), in which case the caller must NOT close.
+bool WaveshareAudio::drain_reader(std::atomic<bool>& reading) {
+  for (int i = 0; i < 100 && reading.load(); i++) vTaskDelay(pdMS_TO_TICKS(2));
+  return !reading.load();
+}
+
 void WaveshareAudio::stop_capture() {
   if (!capture_ready_) return;
   if (capture_mutex_) xSemaphoreTake(capture_mutex_, portMAX_DELAY);
   // Only the LAST consumer to leave closes the ADC. This is what stops one
   // consumer's stop_capture() from cutting the mic out from under the other.
-  if (capture_users_ > 0 && --capture_users_ == 0 && capturing_) {
-    // Wait out any in-flight record_pcm() before closing — esp_codec_dev is
-    // not safe for a concurrent read + close on one handle. A read is a single
-    // ~32 ms chunk, so this settles almost immediately; bounded so a wedged
-    // read can't hang teardown forever.
-    for (int i = 0; i < 100 && reading_.load(); i++) {
-      vTaskDelay(pdMS_TO_TICKS(2));
+  if (capture_users_ > 0 && --capture_users_ == 0 && capturing_.load()) {
+    // Clear capturing_ FIRST so a reader re-checking under its reading_ flag
+    // bails, THEN wait for the one read possibly already in flight to leave
+    // before closing (esp_codec_dev is not safe for concurrent read+close).
+    // The wait is bounded: a read is ~32 ms, budget 200 ms. If it somehow
+    // does NOT drain, the mic task is already wedged in esp_codec_dev_read();
+    // close anyway and log — a permanently-open leaked handle would be worse
+    // than the close, and there is no other actor to retry a deferral.
+    capturing_.store(false);
+    if (!drain_reader(reading_)) {
+      ESP_LOGW(TAG, "mic read did not drain in time — closing anyway");
     }
     esp_codec_dev_close(codec_in_);
-    capturing_ = false;
     restore_rx_channel();
   }
   if (capture_mutex_) xSemaphoreGive(capture_mutex_);
@@ -689,31 +701,40 @@ void WaveshareAudio::stop_capture() {
 bool WaveshareAudio::suspend_capture_for_reclock() {
   if (!capture_mutex_) return false;
   xSemaphoreTake(capture_mutex_, portMAX_DELAY);
-  bool was_open = capturing_;
-  if (was_open) {
-    // Order matters: clear capturing_ FIRST so a reader re-checking under its
-    // reading_ flag bails, THEN drain the one read possibly already in flight,
-    // THEN close. Doing it the other way lets a reader that passed its check
-    // call esp_codec_dev_read() on the handle we just closed.
-    capturing_ = false;
-    for (int i = 0; i < 100 && reading_.load(); i++) vTaskDelay(pdMS_TO_TICKS(2));
-    esp_codec_dev_close(codec_in_);  // refcount untouched — consumer keeps it
+  bool suspended = false;
+  if (capturing_.load()) {
+    // Clear capturing_ FIRST so a reader re-checking under its reading_ flag
+    // bails, THEN drain the one read possibly already in flight, and close
+    // only once it has left — never under an active read.
+    capturing_.store(false);
+    if (drain_reader(reading_)) {
+      esp_codec_dev_close(codec_in_);  // refcount untouched — consumer keeps it
+      suspended = true;
+    } else {
+      ESP_LOGW(TAG, "mic read active — skipping suspend for reclock");
+      capturing_.store(true);  // leave it running; reclock will conflict-log
+    }
   }
   xSemaphoreGive(capture_mutex_);
-  return was_open;
+  return suspended;
 }
 
 bool WaveshareAudio::suspend_capture2_for_reclock() {
   if (!capture2_mutex_) return false;
   xSemaphoreTake(capture2_mutex_, portMAX_DELAY);
-  bool was_open = capturing2_;
-  if (was_open) {
-    capturing2_ = false;  // clear before draining (see suspend_capture_for_reclock)
-    for (int i = 0; i < 100 && reading2_.load(); i++) vTaskDelay(pdMS_TO_TICKS(2));
-    esp_codec_dev_close(codec_in2_);
+  bool suspended = false;
+  if (capturing2_.load()) {
+    capturing2_.store(false);
+    if (drain_reader(reading2_)) {
+      esp_codec_dev_close(codec_in2_);
+      suspended = true;
+    } else {
+      ESP_LOGW(TAG, "wake mic read active — skipping suspend for reclock");
+      capturing2_.store(true);
+    }
   }
   xSemaphoreGive(capture2_mutex_);
-  return was_open;
+  return suspended;
 }
 
 // Reopen capture handles suspended for a reclock, at the mic's native rate.
@@ -835,15 +856,14 @@ size_t WaveshareAudio::record_pcm2(int16_t* out, size_t max_frames) {
 void WaveshareAudio::stop_capture2() {
   if (!codec_in2_ || !capture2_mutex_) return;
   xSemaphoreTake(capture2_mutex_, portMAX_DELAY);
-  if (capture2_users_ > 0 && --capture2_users_ == 0 && capturing2_) {
-    // Wait out any in-flight record_pcm2() before closing (esp_codec_dev is not
-    // safe for concurrent read + close on one handle). Bounded like the mono
-    // path so a wedged read can't hang teardown.
-    for (int i = 0; i < 100 && reading2_.load(); i++) {
-      vTaskDelay(pdMS_TO_TICKS(2));
+  if (capture2_users_ > 0 && --capture2_users_ == 0 && capturing2_.load()) {
+    // Clear the flag first, drain the in-flight read, then close (mono path
+    // pattern). Close anyway on a drain timeout — see stop_capture().
+    capturing2_.store(false);
+    if (!drain_reader(reading2_)) {
+      ESP_LOGW(TAG, "dual-mic read did not drain in time — closing anyway");
     }
     esp_codec_dev_close(codec_in2_);
-    capturing2_ = false;
     restore_rx_channel();  // see the mono path — one shared rx_chan_
   }
   xSemaphoreGive(capture2_mutex_);
