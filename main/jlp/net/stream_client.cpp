@@ -41,6 +41,13 @@ struct State {
   StreamFrameCb cb;
 
   std::atomic<bool> running{true};
+  // When set, the ACK for the current frame is withheld: the server sends
+  // only the newest frame per ACK, so no ACK means no further inbound data
+  // and the shared radio is free for the voice mic uplink (a heavy stream
+  // downlink otherwise starves it — captures come back as empty
+  // transcripts). Set from the UI watch tick while the satellite is
+  // listening/speaking; the frame already in hand is still decoded/shown.
+  std::atomic<bool> paused{false};
   std::atomic<int> sock{-1};
   std::atomic<uint32_t> peer_be{0};  // resolved server IPv4, network order
 
@@ -135,6 +142,20 @@ void record_interval(State& st, uint32_t ms) {
   taskEXIT_CRITICAL(&st.ring_mux);
 }
 
+// Send the single-byte ACK for the current frame, first waiting out any
+// voice pause. Every ACK path goes through here — including the rejected
+// wrong-size frame — so a misconfigured capture can't keep releasing
+// frames and starving the voice uplink. Returns false if the connection
+// should end (stopped, or send failed).
+bool ack_frame(State& st, int sock) {
+  while (st.paused.load() && st.running.load()) {
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+  if (!st.running.load()) return false;
+  uint8_t ack = 1;
+  return send(sock, &ack, 1, 0) == 1;
+}
+
 void run_connection(State& st, int sock) {
   int64_t prev_frame_us = 0;
   bool wrong_size_warned = false;
@@ -176,9 +197,9 @@ void run_connection(State& st, int sock) {
       }
       // Still an ACK: the server cannot tell a rejected frame from a shown
       // one, and withholding it would stall the pacing loop on a
-      // misconfigured capture instead of surfacing the error counter.
-      uint8_t ack = 1;
-      if (send(sock, &ack, 1, 0) != 1) return;
+      // misconfigured capture instead of surfacing the error counter. Via
+      // ack_frame so a wrong-size flood also yields to voice.
+      if (!ack_frame(st, sock)) return;
       continue;
     }
 
@@ -223,8 +244,11 @@ void run_connection(State& st, int sock) {
                (unsigned)frame_len);
     }
 
-    uint8_t ack = 1;
-    if (send(sock, &ack, 1, 0) != 1) return;
+    // Hold the ACK while voice has the radio (ack_frame waits out the
+    // pause): no ACK means the server sends no further frame, so the mic
+    // uplink runs uncontended. The frame just decoded stays on screen; the
+    // picture freezes for the ~few seconds of an utterance, then resumes.
+    if (!ack_frame(st, sock)) return;
 
     uint32_t n = st.frames_decoded.load();
     if (n != 0 && (n & 0x3F) == 0) {
@@ -345,8 +369,12 @@ bool stream_client_start(const char* host, uint16_t port, uint32_t width,
   }
 
   // Core 0: the ui task owns core 1, and socket I/O + the blocking decode
-  // call must never compete with LVGL's render slice.
-  if (xTaskCreatePinnedToCore(stream_task, "jlp_stream", 8192, st, 4, nullptr, 0) !=
+  // call must never compete with LVGL's render slice. Priority 2 stays
+  // strictly below the espos_voice tasks (3) and wake tasks (5), so
+  // ACK-paced stream work always yields the core to voice work; equal
+  // priority would round-robin whole ticks away from the mic's small
+  // deadline-bound chunks.
+  if (xTaskCreatePinnedToCore(stream_task, "jlp_stream", 8192, st, 2, nullptr, 0) !=
       pdPASS) {
     ESP_LOGE(TAG, "task create failed");
     taskENTER_CRITICAL(&g_mux);
@@ -358,6 +386,13 @@ bool stream_client_start(const char* host, uint16_t port, uint32_t width,
 
   ESP_LOGI(TAG, "started, target %s:%u", host, port);
   return true;
+}
+
+void stream_client_set_paused(bool paused) {
+  taskENTER_CRITICAL(&g_mux);
+  State* st = g_state;
+  if (st) st->paused.store(paused);
+  taskEXIT_CRITICAL(&g_mux);
 }
 
 void stream_client_stop() {

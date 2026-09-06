@@ -68,6 +68,23 @@ class WaveshareAudio : public espos_audio::AudioDriver {
   // this the next open on the OTHER handle reads a disabled channel.
   void restore_rx_channel();
 
+  // Close/reopen an open capture handle around a TX reclock so the shared
+  // full-duplex port has no enabled RX peer at a conflicting rate (see the
+  // .cpp for esp_codec_dev's check_fs_compatible). suspend_* return whether
+  // the handle was open; resume_* reopens those at the mic rate. Refcounts
+  // are left untouched — the consuming task keeps ownership.
+  bool suspend_capture_for_reclock();
+  bool suspend_capture2_for_reclock();
+  void resume_capture_after_reclock(bool had_mono, bool had_wake);
+  // Restore suspended capture only when the applied TX rate is native
+  // (kSampleRate) — reopening the mic while TX is still at a non-native
+  // playback rate would re-trigger the full-duplex conflict. Captures stay
+  // suspended across the whole 22050 stream; end_stream's native reclock is
+  // what releases them.
+  void maybe_resume_capture(uint32_t applied_rate);
+  bool capture_suspended_mono_ = false;
+  bool capture_suspended_wake_ = false;
+
   // Reclock playback to `rate` Hz if it isn't already. Serialised by
   // codec_mutex_. Returns false on error. Used by both the chime path
   // (kSampleRate) and streaming (audio-start's rate).

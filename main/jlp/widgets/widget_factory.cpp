@@ -2651,6 +2651,7 @@ struct StreamCtx {
   bool started = false;
   bool visible = false;
   uint32_t watch_timer = 0;
+  int64_t voice_busy_until = 0;  // esp_timer us; stream paused until then
   int udp_sock = -1;
   lv_point_t last_sent = {-32768, -32768};
   std::shared_ptr<StreamShared> sh;
@@ -2736,12 +2737,30 @@ void stream_watch_tick(StreamCtx* c) {
   // widget staying dark while believing it still owns a session.
   if (c->started && !stream_client_stats().running) c->started = false;
   if (!c->started) stream_try_start(c);
+  // Yield the radio to the voice mic uplink while the satellite is active:
+  // a full-rate stream downlink otherwise starves the uplink and the
+  // question reaches the orchestrator as silence. The picture freezes on
+  // its last frame, then resumes. Latch a short tail past the last active
+  // sample so the brief Listening->Idle->Speaking gap (Idle returns at the
+  // transcript, before the reply plays) does not un-pause mid-exchange and
+  // let the reply contend for the radio.
+  const int vstate = voice().state_code();  // 2 listening, 3 speaking
+  if (vstate == 2 || vstate == 3) {
+    c->voice_busy_until = esp_timer_get_time() + 2000000;  // +2 s tail
+  }
+  const bool voice_busy = esp_timer_get_time() < c->voice_busy_until;
+  stream_client_set_paused(voice_busy);
   const StreamStats s = stream_client_stats();
   lv_obj_t* ph = c->sh->placeholder;
   if (!ph) return;
   const int64_t age_ms =
       s.last_frame_us > 0 ? (esp_timer_get_time() - s.last_frame_us) / 1000 : -1;
-  if (c->started && s.connected && age_ms >= 0 && age_ms < 3000) {
+  const bool have_frame = c->started && s.connected && s.last_frame_us > 0;
+  // A deliberate pause freezes frames — don't misreport it as "no signal"
+  // — but only suppress the placeholder once a frame has actually been
+  // shown, or a pause during startup/reconnect would blank the tile.
+  if ((voice_busy && have_frame) ||
+      (have_frame && age_ms >= 0 && age_ms < 3000)) {
     lv_obj_add_flag(ph, LV_OBJ_FLAG_HIDDEN);
   } else {
     lv_label_set_text(ph, (c->started && s.connected) ? "no signal" : "connecting…");
@@ -2755,7 +2774,11 @@ void stream_set_visible(StreamCtx* c, bool vis) {
   if (vis) {
     stream_try_start(c);
     if (!c->watch_timer) {
-      c->watch_timer = cockpit_hal::ui::every(1000, [c]() { stream_watch_tick(c); });
+      // 250 ms, not 1 s: the tick also drives the voice pause, and a
+      // full second of latency at an utterance boundary is enough radio
+      // contention to gap the mic capture. Cheap — the body is a couple
+      // of atomic reads plus one placeholder visibility check.
+      c->watch_timer = cockpit_hal::ui::every(250, [c]() { stream_watch_tick(c); });
     }
   } else {
     if (c->watch_timer) {
