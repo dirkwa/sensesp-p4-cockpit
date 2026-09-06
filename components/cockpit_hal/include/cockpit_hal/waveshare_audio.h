@@ -68,11 +68,17 @@ class WaveshareAudio : public espos_audio::AudioDriver {
   // this the next open on the OTHER handle reads a disabled channel.
   void restore_rx_channel();
 
+  // Wait for an in-flight read to leave before its handle is closed; the
+  // caller must have cleared the capturing flag first. False if a read is
+  // still active at the deadline (caller must then NOT close).
+  bool drain_reader(std::atomic<bool>& reading);
   // Close/reopen an open capture handle around a TX reclock so the shared
   // full-duplex port has no enabled RX peer at a conflicting rate (see the
   // .cpp for esp_codec_dev's check_fs_compatible). suspend_* return whether
-  // the handle was open; resume_* reopens those at the mic rate. Refcounts
-  // are left untouched — the consuming task keeps ownership.
+  // they actually suspended (false if the handle was already closed OR a read
+  // was still active, so the caller must not treat it as suspended);
+  // resume_* reopens those at the mic rate. Refcounts are left untouched —
+  // the consuming task keeps ownership.
   bool suspend_capture_for_reclock();
   bool suspend_capture2_for_reclock();
   void resume_capture_after_reclock(bool had_mono, bool had_wake);
@@ -105,7 +111,12 @@ class WaveshareAudio : public espos_audio::AudioDriver {
   esp_codec_dev_sample_info_t fs_ = {};
   esp_codec_dev_sample_info_t fs_in_ = {};
   bool capture_ready_ = false;    // ADC brought up at init
-  volatile bool capturing_ = false;  // codec_in_ currently open
+  // codec_in_ currently open. Atomic (not volatile): read on the mic
+  // consumer tasks, written on the pipeline/reclock tasks — record_pcm()
+  // publishes reading_ then re-checks this to admit/bail, and the close
+  // paths clear it before draining reading_, so the pairing must be a real
+  // cross-core atomic, not a compiler-barrier-only volatile.
+  std::atomic<bool> capturing_{false};
   // Reference count of active capture consumers. The mic has two independent
   // users — the wake engine (always-on) and the Wyoming push-to-talk/wake
   // pipeline (run_mic) — that start/stop it on different tasks. A single
@@ -134,7 +145,7 @@ class WaveshareAudio : public espos_audio::AudioDriver {
   esp_codec_dev_handle_t codec_in2_ = nullptr;  // IN (ADC / MIC1|MIC2)
   esp_codec_dev_sample_info_t fs_in2_ = {};
   int capture2_users_ = 0;
-  volatile bool capturing2_ = false;
+  std::atomic<bool> capturing2_{false};  // codec_in2_ open; atomic, see capturing_
   std::atomic<bool> reading2_{false};
   SemaphoreHandle_t capture2_mutex_ = nullptr;
 
